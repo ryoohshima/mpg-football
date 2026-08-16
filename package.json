@@ -1,0 +1,15 @@
+{
+  "name": "mpg-football",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MPG（Mon Petit Gazon）の移籍データを取得・可視化する",
+  "scripts": {
+    "fetch": "node src/fetch.mjs",
+    "visualize": "node src/visualize.mjs",
+    "check": "node src/visualize.mjs --check"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
