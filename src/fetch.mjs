@@ -38,7 +38,7 @@ async function api(path, token, clientVersion, { method = "GET", body } = {}) {
     platform: "web",
     application: "mpg",
     "client-version": clientVersion || CLIENT_VERSION,
-    "client-language": "fr",
+    "client-language": "fr-FR",
   };
 
   const res = await fetch(`${API}${path}`, {
@@ -95,14 +95,17 @@ async function main() {
   const targets = env.MPG_DIVISION_ID ? [env.MPG_DIVISION_ID] : divisionIds;
   console.log(`対象ディビジョン: ${targets.join(", ") || "(なし)"}`);
 
-  // 移籍関連エンドポイント（バンドルから確認済み）
+  // 移籍関連エンドポイント（実リクエスト捕獲で確認済み）
+  // - traders / transfersExperts / transfersLosers: 常時取得できる移籍成績ランキング（本命）
+  // - best-available-players / sales-and-bids: 移籍期間中のみ有効。失敗時は skip
   for (const id of targets) {
     console.log(`division ${id} の移籍データを取得中...`);
     const jobs = [
+      ["traders", `/division-ranking/division/${id}/traders?ignoreLive=false`, { method: "GET" }],
+      ["transfers-experts", `/division-ranking/division/${id}/transfersExperts?ignoreLive=false`, { method: "GET" }],
+      ["transfers-losers", `/division-ranking/division/${id}/transfersLosers?ignoreLive=false`, { method: "GET" }],
       ["best-available-players", `/division/${id}/best-available-players`, { method: "GET" }],
       ["sales-and-bids", `/division/${id}/sales-and-bids`, { method: "POST", body: {} }],
-      ["offers-received", `/division-offers/division/${id}/received`, { method: "GET" }],
-      ["offers-emitted", `/division-offer/division/${id}/emitted`, { method: "GET" }],
     ];
     for (const [name, path, opts] of jobs) {
       try {
