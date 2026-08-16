@@ -1,0 +1,7 @@
+# CODEOWNERS
+#
+# PR レビュー自動割り当て用。リポジトリ全体のオーナーを ryoohshima としている。
+# 必要に応じてパス毎の所有者を追加すること（例: /docs/ @doc-team）。
+# https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+* @ryoohshima

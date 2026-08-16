@@ -1,0 +1,38 @@
+// Biome（linter + formatter）設定の雛形
+//
+// 使用方法:
+//   1. pnpm add -D @biomejs/biome
+//   2. package.json の scripts に追加:
+//        "lint": "biome check .",
+//        "lint:fix": "biome check --write ."
+//   3. JS/TS 以外のスタックならこのファイルを削除
+//
+// 補足:
+//   - $schema はインストール後に解決される（それまでエディタが警告を出すが動作に影響なし）
+//   - indentStyle は .editorconfig（2 スペース）と整合させるため明示定義（Biome 既定はタブ）
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true
+  },
+  "formatter": {
+    "indentStyle": "space"
+  },
+  "linter": {
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / エディタ
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# ログ
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 環境変数
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# 依存関係（主要なもの）
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.bundle/
+vendor/
+
+# ビルド成果物（汎用）
+dist/
+build/
+out/
+coverage/
+.cache/
+.next/
+.nuxt/
+.turbo/
+.parcel-cache/
+
+# テスト
+.nyc_output/
+
+# 一時ファイル
+*.tmp
+.tmp/
+tmp/

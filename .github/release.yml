@@ -1,0 +1,35 @@
+changelog:
+  categories:
+    - title: 新機能
+      labels:
+        - feat
+        - feature
+        - enhancement
+    - title: バグ修正
+      labels:
+        - fix
+        - bug
+    - title: パフォーマンス改善
+      labels:
+        - perf
+    - title: リファクタリング
+      labels:
+        - refactor
+    - title: ドキュメント
+      labels:
+        - docs
+    - title: テスト
+      labels:
+        - test
+    - title: CI / ビルド
+      labels:
+        - ci
+        - build
+    - title: その他
+      labels:
+        - chore
+        - "*"
+  exclude:
+    labels:
+      - skip-changelog
+      - dependencies
