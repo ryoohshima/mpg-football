@@ -14,6 +14,8 @@ import { dirname, join } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const API = "https://api.mpg.football";
+// SPA が axios 共通ヘッダに仕込む識別子。欠けると 400 になる（フロント v13.2.0 由来）
+const CLIENT_VERSION = "13.2.0";
 
 // .env を最小パース（依存を足さない）
 function loadEnv() {
@@ -29,14 +31,15 @@ function loadEnv() {
   return env;
 }
 
-async function api(path, token, apiVersion, { method = "GET", body } = {}) {
+async function api(path, token, clientVersion, { method = "GET", body } = {}) {
   const headers = {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
     platform: "web",
+    application: "mpg",
+    "client-version": clientVersion || CLIENT_VERSION,
     "client-language": "fr",
   };
-  if (apiVersion) headers["api-version"] = apiVersion;
 
   const res = await fetch(`${API}${path}`, {
     method,
@@ -79,10 +82,10 @@ async function main() {
     console.error("MPG_TOKEN が未設定でござる。.env.example を参照してトークンを設定してくだされ。");
     process.exit(1);
   }
-  const apiVersion = env.MPG_API_VERSION;
+  const clientVersion = env.MPG_CLIENT_VERSION;
 
   console.log("dashboard を取得中...");
-  const dashboard = await api("/dashboard", token, apiVersion);
+  const dashboard = await api("/dashboard", token, clientVersion);
   save("dashboard", dashboard);
 
   const divisionIds = extractDivisionIds(dashboard);
@@ -103,7 +106,7 @@ async function main() {
     ];
     for (const [name, path, opts] of jobs) {
       try {
-        const data = await api(path, token, apiVersion, opts);
+        const data = await api(path, token, clientVersion, opts);
         save(`${id}__${name}`, data);
       } catch (e) {
         console.warn(`  skip ${name}: ${e.message.split("\n")[0]}`);
