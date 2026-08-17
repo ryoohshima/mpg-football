@@ -96,11 +96,34 @@ export function flattenLiveSales(live) {
 const posTag = (p) => `<span class="pos p${p}">${POSITIONS[p] ?? "?"}</span>`;
 const teamOf = (teams, id) => esc(teams.get(id) ?? id);
 
-// 成績を持つ選手はクリックでモーダルを開けるようにする
-function playerCell(row, statsKeys) {
-  const key = row.playerId && row.statsSeason ? `${row.playerId}|${row.statsSeason}` : null;
-  if (!key || !statsKeys.has(key)) return `<th scope="row">${esc(row.player)}</th>`;
-  return `<th scope="row"><button class="player" data-stats="${esc(key)}" data-name="${esc(row.player)}">${esc(row.player)}</button></th>`;
+// 選手名をクリック可能にする。モーダルで成績と歴代の落札履歴を出す
+function playerCell(row) {
+  if (!row.playerId) return `<th scope="row">${esc(row.player)}</th>`;
+  const season = row.statsSeason ?? "";
+  // data-date は歴代表の中で「今見ている取引」を強調するために使う
+  const date = fmtDate(row.date ?? row.purchaseDate);
+  return `<th scope="row"><button class="player" data-id="${esc(row.playerId)}" data-season="${esc(season)}" data-date="${esc(date)}" data-name="${esc(row.player)}">${esc(row.player)}</button></th>`;
+}
+
+// 全ディビジョンの落札から、選手ごとの歴代（評価額・落札額）を組み立てる
+export function buildPlayerHistory(entries, labelOf) {
+  const byPlayer = new Map();
+  for (const e of entries) {
+    for (const r of e.mercato) {
+      if (!r.playerId) continue;
+      if (!byPlayer.has(r.playerId)) byPlayer.set(r.playerId, []);
+      byPlayer.get(r.playerId).push({
+        where: labelOf(e),
+        phase: r.phase,
+        quotation: r.quotation ?? null,
+        price: r.price ?? null,
+        team: e.teams.get(r.teamId) ?? r.teamId,
+        date: fmtDate(r.date),
+      });
+    }
+  }
+  for (const list of byPlayer.values()) list.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  return Object.fromEntries(byPlayer);
 }
 
 function rivalsText(rivals, teams) {
@@ -108,13 +131,13 @@ function rivalsText(rivals, teams) {
   return rivals.map((b) => `${teamOf(teams, b.teamId)} <span class="muted">${esc(b.price)}</span>`).join(" / ");
 }
 
-function mercatoRows(list, teams, statsKeys) {
+function mercatoRows(list, teams) {
   return list
     .map((r) => {
       const over = (r.price ?? 0) - (r.quotation ?? 0);
       return `<tr>
         <td>${posTag(r.position)}</td>
-        ${playerCell(r, statsKeys)}
+        ${playerCell(r)}
         <td>${teamOf(teams, r.teamId)}</td>
         <td class="num">${esc(r.quotation)}</td>
         <td class="num strong">${esc(r.price)}</td>
@@ -130,7 +153,7 @@ const MERCATO_HEAD = `<thead><tr><th></th><th>選手</th><th>獲得監督</th><t
 
 // フェーズタブ + 各フェーズのテーブル。
 // 「すべて」は全フェーズのパネルを同時表示するだけで、行を重複して持たない
-export function mercatoPanel(rows, teams, key, statsKeys = new Set()) {
+export function mercatoPanel(rows, teams, key) {
   if (rows.length === 0) return "";
   const byPhase = new Map();
   for (const r of rows) {
@@ -152,7 +175,7 @@ export function mercatoPanel(rows, teams, key, statsKeys = new Set()) {
       ([n, list]) =>
         `<div class="phase-panel active" id="${key}-p${n}">
            <h5>フェーズ ${n} <small>${list.length} 名</small></h5>
-           <table>${MERCATO_HEAD}<tbody>${mercatoRows(list, teams, statsKeys)}</tbody></table>
+           <table>${MERCATO_HEAD}<tbody>${mercatoRows(list, teams)}</tbody></table>
          </div>`,
     )
     .join("");
@@ -164,13 +187,13 @@ export function mercatoPanel(rows, teams, key, statsKeys = new Set()) {
   </div>`;
 }
 
-function liveTable(rows, teams, statsKeys) {
+function liveTable(rows, teams) {
   if (rows.length === 0) return "";
   const body = rows
     .map(
       (r) => `<tr>
         <td>${posTag(r.position)}</td>
-        ${playerCell(r, statsKeys)}
+        ${playerCell(r)}
         <td>${teamOf(teams, r.teamId)}</td>
         <td class="num">${esc(r.purchasePrice)}</td>
         <td class="num strong">${esc(r.salePrice)}</td>
@@ -232,19 +255,50 @@ const STAT_FIELDS = [
 const TAB_SCRIPT = `
 const STATS = __STATS__;
 const FIELDS = __FIELDS__;
+const HISTORY = __HISTORY__;
 
-function openModal(key, name) {
+const escHtml = (v) => String(v).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function statsHtml(key) {
   const s = STATS[key];
-  if (!s) return;
-  const season = key.split("|")[1];
-  const rows = FIELDS
+  if (!s) return '<p class="empty">このシーズンの成績データはありません</p>';
+  // 値は数値のみ（fetch 側で集計値だけを抽出している）。念のため Number で固定する
+  return '<div class="stat-grid">' + FIELDS
     .filter(([k]) => s[k] !== undefined && s[k] !== null)
-    // 値は数値のみ（fetch 側で集計値だけを抽出している）。念のため Number で固定する
     .map(([k, label, unit]) => \`<div class="stat"><dt>\${label}</dt><dd>\${Number(s[k])}<span class="unit">\${unit}</span></dd></div>\`)
-    .join("");
+    .join("") + '</div>';
+}
+
+function historyHtml(playerId, currentDate) {
+  const list = HISTORY[playerId] || [];
+  if (list.length === 0) return "";
+  const rows = list.map((h) => {
+    const diff = (h.price ?? 0) - (h.quotation ?? 0);
+    const cls = diff > 0 ? "over" : diff < 0 ? "under" : "muted";
+    const now = h.date === currentDate ? " current" : "";
+    return \`<tr class="\${now.trim()}">
+      <td>\${escHtml(h.where)}</td>
+      <td class="muted">F\${Number(h.phase)}</td>
+      <td>\${escHtml(h.team)}</td>
+      <td class="num">\${h.quotation === null ? "-" : Number(h.quotation)}</td>
+      <td class="num strong">\${h.price === null ? "-" : Number(h.price)}</td>
+      <td class="num \${cls}">\${diff > 0 ? "+" : ""}\${diff}</td>
+      <td class="date">\${escHtml(h.date)}</td>
+    </tr>\`;
+  }).join("");
+  return \`<h6>歴代の評価額と落札額 <small>\${list.length} 回</small></h6>
+    <div class="hist-wrap"><table class="hist">
+      <thead><tr><th>シーズン</th><th>F</th><th>獲得監督</th><th class="num">評価額</th><th class="num">落札額</th><th class="num">差</th><th>日付</th></tr></thead>
+      <tbody>\${rows}</tbody>
+    </table></div>\`;
+}
+
+function openModal(playerId, season, name, date) {
+  const key = playerId + "|" + season;
   document.getElementById("modal-title").textContent = name;
-  document.getElementById("modal-season").textContent = season + "-" + String(Number(season) + 1).slice(2) + " シーズン";
-  document.getElementById("modal-body").innerHTML = rows;
+  document.getElementById("modal-season").textContent =
+    season ? season + "-" + String(Number(season) + 1).slice(2) + " シーズン成績" : "";
+  document.getElementById("modal-body").innerHTML = statsHtml(key) + historyHtml(playerId, date);
   document.getElementById("modal").classList.add("open");
 }
 
@@ -259,7 +313,7 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("click", (e) => {
   const player = e.target.closest(".player");
   if (player) {
-    openModal(player.dataset.stats, player.dataset.name);
+    openModal(player.dataset.id, player.dataset.season, player.dataset.name, player.dataset.date);
     return;
   }
   // 背景（オーバーレイ自身）か × ボタンのときだけ閉じる。中身のクリックでは閉じない
@@ -296,7 +350,6 @@ function main() {
 
   // 選手成績（あれば）。モーダル表示に使う
   const allStats = files.includes("player-stats.json") ? readJson("player-stats.json") : {};
-  const statsKeys = new Set(Object.keys(allStats));
 
   // リーグ名（mpg_league_*.json）を引けるようにする
   const leagueNames = new Map();
@@ -333,6 +386,9 @@ function main() {
     return `${name} S${e.season}${div}`;
   };
 
+  // 選手ごとの歴代（評価額・落札額）。全シーズンの落札から組み立てる
+  const playerHistory = buildPlayerHistory(entries, label);
+
   const tabs = entries
     .map(
       (e, i) =>
@@ -343,8 +399,8 @@ function main() {
   const panels = entries
     .map((e, i) => {
       const parts = [
-        mercatoPanel(e.mercato, e.teams, `s-${e.id}`, statsKeys),
-        liveTable(e.live, e.teams, statsKeys),
+        mercatoPanel(e.mercato, e.teams, `s-${e.id}`),
+        liveTable(e.live, e.teams),
         restartTable(e.restarting, e.teams),
       ].filter(Boolean);
       return `<div class="season-panel${i === 0 ? " active" : ""}" id="s-${e.id}">
@@ -415,8 +471,16 @@ function main() {
   .close{font:inherit;font-size:20px;line-height:1;padding:2px 8px;border:none;border-radius:6px;
          background:var(--surface);color:var(--muted);cursor:pointer}
   .close:hover{color:var(--ink)}
-  #modal-body{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin:0}
+  #modal-body{margin:0}
+  .stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px}
   .stat{background:var(--surface);border-radius:6px;padding:7px 10px}
+  .empty{color:var(--muted);font-size:13px;margin:0}
+  #modal-body h6{font-size:12px;font-weight:600;color:var(--muted);margin:18px 0 6px}
+  .hist-wrap{overflow-x:auto}
+  table.hist{font-size:12px}
+  table.hist td,table.hist th{padding:3px 7px}
+  table.hist tr.current{background:var(--surface)}
+  table.hist tr.current td:first-child{font-weight:600}
   .stat dt{font-size:11px;color:var(--muted)}
   .stat dd{margin:1px 0 0;font-size:17px;font-weight:600;font-variant-numeric:tabular-nums}
   .stat .unit{font-size:11px;font-weight:400;color:var(--muted);margin-left:2px}
@@ -435,7 +499,7 @@ ${panels || "<p>取引記録が見つからなかったでござる。</p>"}
     <dl id="modal-body"></dl>
   </div>
 </div>
-<script>${TAB_SCRIPT.replace("__STATS__", JSON.stringify(allStats)).replace("__FIELDS__", JSON.stringify(STAT_FIELDS))}</script>
+<script>${TAB_SCRIPT.replace("__STATS__", JSON.stringify(allStats)).replace("__FIELDS__", JSON.stringify(STAT_FIELDS)).replace("__HISTORY__", JSON.stringify(playerHistory))}</script>
 </body></html>`;
 
   mkdirSync(join(ROOT, "dist"), { recursive: true });
@@ -472,8 +536,8 @@ if (!isMain) {
   const panel = mercatoPanel(rows, teams, "k1");
   console.assert((panel.match(/phase-tab/g) ?? []).length === 3, "フェーズタブ（すべて+2）が生成されていない");
   console.assert(panel.includes('id="k1-p2"'), "フェーズ 2 のパネルが無い");
-  // 「すべて」は表示切替で賄うため、行を重複して持たない
-  console.assert((panel.match(/van Dijk/g) ?? []).length === 1, "落札行が重複して描画されている");
+  // 「すべて」は表示切替で賄うため、行を重複して持たない（1行につき data-name とセルで2回出る）
+  console.assert((panel.match(/van Dijk/g) ?? []).length === 2, "落札行が重複して描画されている");
   console.assert((panel.match(/class="phase-panel active"/g) ?? []).length === 2, "フェーズパネル数が不正");
 
   const sales = flattenLiveSales({
@@ -489,10 +553,22 @@ if (!isMain) {
   console.assert(statsSeasonOf("2026-01-06T00:00:00Z") === 2025, "シーズン判定が fetch と食い違う");
   console.assert(rows[0].statsSeason === 2021, `落札行のシーズン付与失敗: ${rows[0].statsSeason}`); // 2022-03 は 2021 シーズン
 
-  // 成績を持つ選手のみクリック可能にする
-  const withStats = mercatoPanel(rows, teams, "k2", new Set(["a|2021"]));
-  console.assert(withStats.includes('data-stats="a|2021"'), "成績ありの選手がボタン化されていない");
-  console.assert((withStats.match(/class="player"/g) ?? []).length === 1, "成績なしの選手までボタン化している");
+  // 選手はすべてクリック可能（成績が無くても歴代は出せる）
+  const panel2 = mercatoPanel(rows, teams, "k2");
+  console.assert(panel2.includes('data-id="a"') && panel2.includes('data-season="2021"'), "選手ボタンの属性が不足");
+  console.assert((panel2.match(/class="player"/g) ?? []).length === 2, "全選手がボタン化されていない");
+
+  // 歴代は全ディビジョンの落札を選手ごとに時系列でまとめる
+  const hist = buildPlayerHistory(
+    [
+      { mercato: [{ playerId: "a", phase: 1, quotation: 29, price: 40, teamId: "t1", date: "2023-08-20T00:00:00Z" }], teams },
+      { mercato: [{ playerId: "a", phase: 2, quotation: 31, price: 25, teamId: "t1", date: "2022-03-15T00:00:00Z" }], teams },
+    ],
+    () => "テストリーグ S1",
+  );
+  console.assert(hist.a.length === 2, `歴代の集約失敗: ${hist.a?.length}`);
+  console.assert(hist.a[0].date === "2022-03-15", `時系列に並んでいない: ${hist.a[0].date}`);
+  console.assert(hist.a[0].team === "🌟 Gota", "歴代の監督名が解決されていない");
   console.log("self-check OK");
 } else {
   main();
