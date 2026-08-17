@@ -153,6 +153,8 @@ async function main() {
   for (const id of targets) {
     console.log(`division ${id} の移籍データを取得中...`);
     const jobs = [
+      // 全取引の記録（フェーズ別の入札/落札・シーズン中の売買）。可視化の主データ
+      ["history", `/division-history/division/${id}`, { method: "GET" }],
       ["traders", `/division-ranking/division/${id}/traders?ignoreLive=false`, { method: "GET" }],
       ["transfers-experts", `/division-ranking/division/${id}/transfersExperts?ignoreLive=false`, { method: "GET" }],
       ["transfers-losers", `/division-ranking/division/${id}/transfersLosers?ignoreLive=false`, { method: "GET" }],

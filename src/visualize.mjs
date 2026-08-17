@@ -1,10 +1,10 @@
 // MPG 移籍データ可視化スクリプト（静的 HTML 生成）
 //
-// data/*.json を読み込み、ディビジョンごとに以下を描画する。
-//   - traders:           チームの資産価値の伸び（初期値 → 現在値、delta 順）
-//   - transfersExperts:  儲かった移籍 上位（購入額 → 売却額）
-//   - transfersLosers:   損した移籍 上位
-// teamId はユーザー名に、playerId は選手名に解決する。
+// data/*__history.json から全取引を一覧化する。
+//   - mercato:    フェーズ別の落札（誰がいくらで獲得したか / 競合した入札）
+//   - live:       シーズン中の売買（購入額と売却額の差＝損益）
+//   - restarting: リスタート時の保有引き継ぎ
+// 選手名・評価額は history に含まれるため、選手プールへの参照は不要。
 //
 // 使い方: node src/visualize.mjs && open dist/index.html
 
@@ -18,109 +18,151 @@ const DATA = join(ROOT, "data");
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
-// 選手プール（players-*.json）と個別取得分（players-extra.json）から
-// playerId -> 表示名 の辞書を作る。
-// プールは { players: [...] }、個別取得分は { [id]: {...} } の形。
-export function buildPlayerNames(sources) {
-  const names = new Map();
-  const add = (p) => {
-    if (p?.id) names.set(p.id, [p.firstName, p.lastName].filter(Boolean).join(" ") || p.id);
-  };
-  for (const src of sources) {
-    if (Array.isArray(src?.players)) src.players.forEach(add);
-    else if (src && typeof src === "object") Object.values(src).forEach(add);
-  }
-  return names;
-}
+const POSITIONS = { 1: "GK", 2: "DF", 3: "MF", 4: "FW" };
 
-// teamsUsers から teamId -> ユーザー名 の辞書を作る
-export function buildTeamNames(teamsUsers) {
-  const names = new Map();
-  for (const [teamId, user] of Object.entries(teamsUsers ?? {})) {
-    names.set(teamId, user?.username || user?.firstName || teamId);
-  }
-  return names;
-}
-
-const readJson = (f) => JSON.parse(readFileSync(join(DATA, f), "utf8"));
+export const playerName = (p) => [p?.firstName, p?.lastName].filter(Boolean).join(" ") || p?.id || "";
 const fmtDate = (s) => (s ? String(s).slice(0, 10) : "");
+const readJson = (f) => JSON.parse(readFileSync(join(DATA, f), "utf8"));
 
-// 選手プールは現行シーズン分のみのため、既にリーグを去った選手は解決できない。
-// 捏造せず ID を読みやすく表示する。
-export function playerLabel(playerId, players) {
-  const name = players.get(playerId);
-  if (name) return { text: name, unknown: false };
-  const num = String(playerId).replace(/^mpg_championship_player_/, "");
-  return { text: `選手 #${num}`, unknown: true };
+// teamsUsers（traders 等に含まれる）から teamId -> ユーザー名 の辞書を作る
+export function buildTeamNames(sources) {
+  const names = new Map();
+  for (const src of sources) {
+    for (const [teamId, user] of Object.entries(src?.teamsUsers ?? {})) {
+      names.set(teamId, user?.username || user?.firstName || teamId);
+    }
+  }
+  return names;
 }
 
-// 左右に伸びる棒（正負両方向）。max は絶対値の最大。
-function deltaBar(delta, max) {
-  const w = max > 0 ? Math.round((Math.abs(delta) / max) * 50) : 0;
-  const pos = delta >= 0;
-  return `<span class="dbar">
-    <span class="dbar-half left">${pos ? "" : `<span class="fill neg" style="width:${w * 2}%"></span>`}</span>
-    <span class="dbar-half right">${pos ? `<span class="fill pos" style="width:${w * 2}%"></span>` : ""}</span>
-  </span>`;
+// mercato（フェーズ番号 -> 選手辞書）を落札レコードの配列に均す
+export function flattenMercato(mercato) {
+  const rows = [];
+  for (const [phase, players] of Object.entries(mercato ?? {})) {
+    for (const p of Object.values(players ?? {})) {
+      if (!p?.wonBid) continue;
+      rows.push({
+        phase: Number(phase),
+        player: playerName(p),
+        position: p.position,
+        quotation: p.quotation,
+        teamId: p.wonBid.teamId,
+        price: p.wonBid.price,
+        date: p.wonBid.bidDate,
+        rivals: (p.lostBids ?? []).sort((a, b) => (b.price ?? 0) - (a.price ?? 0)),
+      });
+    }
+  }
+  return rows.sort((a, b) => a.phase - b.phase || (b.price ?? 0) - (a.price ?? 0));
 }
 
-function tradersSection(data) {
-  const rows = data.traders ?? [];
+// live（日付 -> {sales}）を売却レコードの配列に均す
+export function flattenLiveSales(live) {
+  const rows = [];
+  for (const day of Object.values(live ?? {})) {
+    for (const s of day?.sales ?? []) {
+      rows.push({
+        player: playerName(s),
+        position: s.position,
+        teamId: s.fromTeam,
+        purchasePrice: s.purchasePrice,
+        salePrice: s.salePrice,
+        delta: (s.salePrice ?? 0) - (s.purchasePrice ?? 0),
+        purchaseDate: s.purchaseDate,
+        saleDate: s.saleDate,
+      });
+    }
+  }
+  return rows.sort((a, b) => String(a.saleDate).localeCompare(String(b.saleDate)));
+}
+
+const posTag = (p) => `<span class="pos p${p}">${POSITIONS[p] ?? "?"}</span>`;
+const teamOf = (teams, id) => esc(teams.get(id) ?? id);
+
+// 競合入札を「監督名 価格」の羅列にする
+function rivalsText(rivals, teams) {
+  if (!rivals || rivals.length === 0) return '<span class="muted">単独</span>';
+  return rivals.map((b) => `${teamOf(teams, b.teamId)} <span class="muted">${esc(b.price)}</span>`).join(" / ");
+}
+
+function mercatoTable(rows, teams) {
   if (rows.length === 0) return "";
-  const teams = buildTeamNames(data.teamsUsers);
-  const max = Math.max(1, ...rows.map((r) => Math.abs(r.delta ?? 0)));
-  const maxVal = Math.max(1, ...rows.map((r) => Math.max(r.initialSquadValue ?? 0, r.currentSquadValue ?? 0)));
+  const byPhase = new Map();
+  for (const r of rows) {
+    if (!byPhase.has(r.phase)) byPhase.set(r.phase, []);
+    byPhase.get(r.phase).push(r);
+  }
 
-  const body = [...rows]
-    .sort((a, b) => (b.delta ?? 0) - (a.delta ?? 0))
-    .map((r) => {
-      const init = Math.round(((r.initialSquadValue ?? 0) / maxVal) * 100);
-      const curr = Math.round(((r.currentSquadValue ?? 0) / maxVal) * 100);
-      return `<tr>
-        <th scope="row">${esc(teams.get(r.teamId) ?? r.teamId)}</th>
-        <td class="num">${esc(r.initialSquadValue)}</td>
-        <td class="num">${esc(r.currentSquadValue)}</td>
-        <td class="growth">
-          <span class="track"><span class="fill base" style="width:${init}%"></span><span class="fill grow" style="width:${Math.max(0, curr - init)}%"></span></span>
-        </td>
-        <td class="num ${(r.delta ?? 0) >= 0 ? "up" : "down"}">${(r.delta ?? 0) >= 0 ? "+" : ""}${esc(r.delta)}</td>
-        <td class="delta">${deltaBar(r.delta ?? 0, max)}</td>
-      </tr>`;
+  return [...byPhase.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([phase, list]) => {
+      const body = list
+        .map((r) => {
+          const over = (r.price ?? 0) - (r.quotation ?? 0);
+          return `<tr>
+            <td>${posTag(r.position)}</td>
+            <th scope="row">${esc(r.player)}</th>
+            <td>${teamOf(teams, r.teamId)}</td>
+            <td class="num">${esc(r.quotation)}</td>
+            <td class="num strong">${esc(r.price)}</td>
+            <td class="num ${over > 0 ? "over" : over < 0 ? "under" : "muted"}">${over > 0 ? "+" : ""}${esc(over)}</td>
+            <td class="rivals">${rivalsText(r.rivals, teams)}</td>
+            <td class="date">${esc(fmtDate(r.date))}</td>
+          </tr>`;
+        })
+        .join("");
+
+      return `<h4>フェーズ ${phase} <small>${list.length} 名</small></h4>
+        <table>
+          <thead><tr><th></th><th>選手</th><th>獲得監督</th><th class="num">評価額</th><th class="num">落札額</th><th class="num">差</th><th>競合入札</th><th>日付</th></tr></thead>
+          <tbody>${body}</tbody>
+        </table>`;
     })
+    .join("\n");
+}
+
+function liveTable(rows, teams) {
+  if (rows.length === 0) return "";
+  const body = rows
+    .map(
+      (r) => `<tr>
+        <td>${posTag(r.position)}</td>
+        <th scope="row">${esc(r.player)}</th>
+        <td>${teamOf(teams, r.teamId)}</td>
+        <td class="num">${esc(r.purchasePrice)}</td>
+        <td class="num strong">${esc(r.salePrice)}</td>
+        <td class="num ${r.delta > 0 ? "over" : r.delta < 0 ? "under" : "muted"}">${r.delta > 0 ? "+" : ""}${esc(r.delta)}</td>
+        <td class="date">${esc(fmtDate(r.purchaseDate))} → ${esc(fmtDate(r.saleDate))}</td>
+      </tr>`,
+    )
     .join("");
 
-  return `<h3>チーム資産価値の伸び <small>${rows.length} チーム</small></h3>
+  return `<h4>シーズン中の売却 <small>${rows.length} 件</small></h4>
     <table>
-      <thead><tr><th>監督</th><th class="num">初期値</th><th class="num">現在値</th><th>推移</th><th class="num">増減</th><th>増減幅</th></tr></thead>
+      <thead><tr><th></th><th>選手</th><th>売却した監督</th><th class="num">購入額</th><th class="num">売却額</th><th class="num">損益</th><th>保有期間</th></tr></thead>
       <tbody>${body}</tbody>
     </table>`;
 }
 
-function transfersSection(rows, teamsUsers, players, title, limit = 10) {
-  if (!rows || rows.length === 0) return "";
-  const teams = buildTeamNames(teamsUsers);
-  const max = Math.max(1, ...rows.map((r) => Math.abs(r.delta ?? 0)));
-
-  const body = [...rows]
-    .sort((a, b) => Math.abs(b.delta ?? 0) - Math.abs(a.delta ?? 0))
-    .slice(0, limit)
-    .map((r) => {
-      const p = playerLabel(r.playerId, players);
-      return `<tr>
-        <th scope="row" class="${p.unknown ? "unknown" : ""}">${esc(p.text)}</th>
-        <td>${esc(teams.get(r.teamId) ?? r.teamId)}</td>
-        <td class="num">${esc(r.purchasePrice)}</td>
-        <td class="num">${esc(r.salePrice)}</td>
-        <td class="num ${(r.delta ?? 0) >= 0 ? "up" : "down"}">${(r.delta ?? 0) >= 0 ? "+" : ""}${esc(r.delta)}</td>
-        <td class="delta">${deltaBar(r.delta ?? 0, max)}</td>
-        <td class="date">${esc(fmtDate(r.purchaseDate))} → ${esc(fmtDate(r.saleDate))}</td>
-      </tr>`;
-    })
+function restartTable(purchases, teams) {
+  if (!purchases || purchases.length === 0) return "";
+  const body = [...purchases]
+    .sort((a, b) => (b.purchasePrice ?? 0) - (a.purchasePrice ?? 0))
+    .map(
+      (p) => `<tr>
+        <td>${posTag(p.position)}</td>
+        <th scope="row">${esc(playerName(p))}</th>
+        <td>${teamOf(teams, p.fromTeam)}</td>
+        <td class="num">${esc(p.quotation)}</td>
+        <td class="num strong">${esc(p.purchasePrice)}</td>
+        <td class="date">${esc(fmtDate(p.purchaseDate))}</td>
+      </tr>`,
+    )
     .join("");
 
-  return `<h3>${esc(title)} <small>上位 ${Math.min(limit, rows.length)} / ${rows.length} 件</small></h3>
+  return `<h4>リスタート時の引き継ぎ <small>${purchases.length} 名</small></h4>
     <table>
-      <thead><tr><th>選手</th><th>監督</th><th class="num">購入</th><th class="num">売却</th><th class="num">損益</th><th>損益幅</th><th>期間</th></tr></thead>
+      <thead><tr><th></th><th>選手</th><th>保有監督</th><th class="num">評価額</th><th class="num">購入額</th><th>購入日</th></tr></thead>
       <tbody>${body}</tbody>
     </table>`;
 }
@@ -131,28 +173,37 @@ function main() {
     process.exit(1);
   }
   const files = readdirSync(DATA).filter((f) => f.endsWith(".json"));
-  const players = buildPlayerNames(files.filter((f) => f.startsWith("players-")).map(readJson));
 
-  // ディビジョンごとに traders / experts / losers をまとめる
-  const divisions = new Map();
-  for (const f of files) {
-    const m = f.match(/^(mpg_division_[^_]+_\d+_\d+)__(traders|transfers-experts|transfers-losers)\.json$/);
-    if (!m) continue;
-    if (!divisions.has(m[1])) divisions.set(m[1], {});
-    divisions.get(m[1])[m[2]] = readJson(f);
-  }
+  let totalMercato = 0;
+  let totalLive = 0;
+  const sections = files
+    .filter((f) => f.endsWith("__history.json"))
+    .sort()
+    .map((f) => {
+      const id = f.replace("__history.json", "");
+      const h = readJson(f);
+      // 監督名は traders / transfers-* の teamsUsers から引く
+      const teams = buildTeamNames(
+        files.filter((x) => x.startsWith(id) && !x.endsWith("__history.json")).map(readJson),
+      );
 
-  const sections = [...divisions.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([id, d]) => {
-      const teamsUsers = d.traders?.teamsUsers ?? d["transfers-experts"]?.teamsUsers ?? {};
+      const mercato = flattenMercato(h.mercato);
+      const live = flattenLiveSales(h.live);
+      totalMercato += mercato.length;
+      totalLive += live.length;
+
       const parts = [
-        d.traders ? tradersSection(d.traders) : "",
-        transfersSection(d["transfers-experts"]?.transfersExperts, d["transfers-experts"]?.teamsUsers ?? teamsUsers, players, "儲かった移籍"),
-        transfersSection(d["transfers-losers"]?.transfersLosers, d["transfers-losers"]?.teamsUsers ?? teamsUsers, players, "損した移籍"),
+        mercatoTable(mercato, teams),
+        liveTable(live, teams),
+        restartTable(h.restartingData?.purchases, teams),
       ].filter(Boolean);
       if (parts.length === 0) return "";
-      return `<section><h2>${esc(id.replace(/^mpg_division_/, ""))}</h2>${parts.join("\n")}</section>`;
+
+      return `<section>
+        <h2>${esc(id.replace(/^mpg_division_/, ""))}
+          <small>落札 ${mercato.length} 件 / 売却 ${live.length} 件</small></h2>
+        ${parts.join("\n")}
+      </section>`;
     })
     .filter(Boolean)
     .join("\n");
@@ -160,55 +211,46 @@ function main() {
   const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MPG 移籍データ</title>
+<title>MPG 移籍取引一覧</title>
 <style>
   :root{--bg:#fff;--ink:#1a1a1a;--muted:#6b7280;--line:#e5e7eb;--surface:#f3f4f6;
-        --base:#94a3b8;--grow:#3b82f6;--pos:#2563eb;--neg:#dc2626}
+        --over:#dc2626;--under:#2563eb;
+        --gk:#f59e0b;--df:#3b82f6;--mf:#10b981;--fw:#ef4444}
   @media(prefers-color-scheme:dark){:root{--bg:#0f1115;--ink:#e6e6e6;--muted:#9aa0a6;--line:#2a2d34;--surface:#1c1f26;
-        --base:#64748b;--grow:#60a5fa;--pos:#60a5fa;--neg:#f87171}}
+        --over:#f87171;--under:#60a5fa;
+        --gk:#fbbf24;--df:#60a5fa;--mf:#34d399;--fw:#f87171}}
   *{box-sizing:border-box}
-  body{margin:0 auto;padding:24px;max-width:1000px;font:15px/1.6 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
-  h1{font-size:22px;margin-bottom:4px}
-  h2{font-size:17px;margin:28px 0 4px;padding-top:20px;border-top:1px solid var(--line)}
-  h3{font-size:14px;font-weight:600;margin:20px 0 6px;color:var(--muted)}
+  body{margin:0 auto;padding:24px;max-width:1080px;font:15px/1.6 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  h1{font-size:22px;margin-bottom:2px}
+  h2{font-size:17px;margin:32px 0 4px;padding-top:20px;border-top:1px solid var(--line)}
+  h4{font-size:13px;font-weight:600;margin:20px 0 6px;color:var(--muted)}
   small{color:var(--muted);font-weight:400}
   table{border-collapse:collapse;width:100%;font-size:13px}
-  th,td{padding:5px 8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th,td{padding:4px 8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
   thead th{color:var(--muted);font-weight:500;font-size:12px}
   tbody th{font-weight:500}
+  tbody tr:hover{background:var(--surface)}
   .num{text-align:right;font-variant-numeric:tabular-nums}
-  .up{color:var(--pos)}.down{color:var(--neg)}
+  .strong{font-weight:600}
+  .over{color:var(--over)}
+  .under{color:var(--under)}
+  .muted{color:var(--muted)}
   .date{color:var(--muted);font-size:12px}
-  .growth{width:34%;min-width:120px}
-  .track{display:flex;height:12px;background:var(--surface);border-radius:4px;overflow:hidden}
-  .fill{display:block;height:100%}
-  .fill.base{background:var(--base)}
-  .fill.grow{background:var(--grow)}
-  .delta{width:110px}
-  .dbar{display:flex;height:12px;align-items:center}
-  .dbar-half{flex:1;display:flex;height:100%;background:var(--surface)}
-  .dbar-half.left{justify-content:flex-end;border-radius:4px 0 0 4px}
-  .dbar-half.right{border-radius:0 4px 4px 0}
-  .fill.pos{background:var(--pos);border-radius:0 4px 4px 0}
-  .fill.neg{background:var(--neg);border-radius:4px 0 0 4px}
-  .legend{color:var(--muted);font-size:12px;margin-top:2px}
-  .legend b{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle}
-  .unknown{color:var(--muted);font-weight:400}
-  .note{color:var(--muted);font-size:12px;margin-top:24px;padding-top:12px;border-top:1px solid var(--line)}
+  .rivals{font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+  .pos{display:inline-block;min-width:26px;text-align:center;font-size:10px;font-weight:700;
+       padding:1px 4px;border-radius:3px;color:#fff}
+  .p1{background:var(--gk)}.p2{background:var(--df)}.p3{background:var(--mf)}.p4{background:var(--fw)}
+  .lead{color:var(--muted);font-size:13px;margin-top:4px}
 </style></head>
 <body>
-<h1>MPG 移籍データ <small>スナップショット</small></h1>
-<p class="legend">
-  推移: <b style="background:var(--base)"></b> 初期値 / <b style="background:var(--grow)"></b> 増加分 ・
-  損益: <b style="background:var(--pos)"></b> プラス / <b style="background:var(--neg)"></b> マイナス
-</p>
-${sections || "<p>移籍ランキングのデータが見つからなかったでござる。完了済みシーズンのディビジョンを取得してくだされ。</p>"}
-<p class="note">選手名は現行シーズンの選手プールで解決し、載っていない選手（既にリーグを去った選手）は個別に取得している。それでも引けなかった場合のみ ID を表示する。</p>
+<h1>MPG 移籍取引一覧</h1>
+<p class="lead">落札 ${totalMercato} 件 / シーズン中の売却 ${totalLive} 件。「差」は落札額 − 評価額（<span class="over">赤=高値掴み</span> / <span class="under">青=安値落札</span>）。</p>
+${sections || "<p>取引記録が見つからなかったでござる。完了済みシーズンのディビジョンを取得してくだされ。</p>"}
 </body></html>`;
 
   mkdirSync(join(ROOT, "dist"), { recursive: true });
   writeFileSync(join(ROOT, "dist", "index.html"), html);
-  console.log(`生成完了: dist/index.html（ディビジョン ${divisions.size} 件）`);
+  console.log(`生成完了: dist/index.html（落札 ${totalMercato} 件 / 売却 ${totalLive} 件）`);
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
@@ -216,20 +258,31 @@ const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.arg
 if (!isMain) {
   // モジュールとして読み込まれた場合は何もしない
 } else if (process.argv.includes("--check")) {
-  const names = buildPlayerNames([
-    { players: [{ id: "p1", firstName: "Kylian", lastName: "Mbappé" }] },
-    { p2: { id: "p2", firstName: "Jamie", lastName: "Vardy" } }, // players-extra.json の形
-  ]);
-  console.assert(names.get("p1") === "Kylian Mbappé", `プール由来の選手名の解決失敗: ${names.get("p1")}`);
-  console.assert(names.get("p2") === "Jamie Vardy", `個別取得分の選手名の解決失敗: ${names.get("p2")}`);
-  const teams = buildTeamNames({ t1: { username: "🌟 Gota", firstName: "Gota" }, t2: { firstName: "oga" } });
-  console.assert(teams.get("t1") === "🌟 Gota" && teams.get("t2") === "oga", "チーム名の解決失敗");
-  console.assert(deltaBar(-10, 20).includes("neg"), "負の delta が負方向に描画されていない");
-  console.assert(deltaBar(10, 20).includes("pos"), "正の delta が正方向に描画されていない");
-  const known = playerLabel("p1", names);
-  const unknown = playerLabel("mpg_championship_player_101668", names);
-  console.assert(known.text === "Kylian Mbappé" && !known.unknown, "既知選手のラベル失敗");
-  console.assert(unknown.text === "選手 #101668" && unknown.unknown, `未収録選手のラベル失敗: ${unknown.text}`);
+  const rows = flattenMercato({
+    1: {
+      a: {
+        id: "a",
+        firstName: "Virgil",
+        lastName: "van Dijk",
+        quotation: 29,
+        position: 2,
+        wonBid: { teamId: "t1", price: 40, bidDate: "2022-03-15T12:25:01Z" },
+        lostBids: [{ teamId: "t2", price: 31 }, { teamId: "t3", price: 35 }],
+      },
+      b: { id: "b", lastName: "未落札", wonBid: null },
+    },
+  });
+  console.assert(rows.length === 1, `落札のみ抽出できていない: ${rows.length}`);
+  console.assert(rows[0].player === "Virgil van Dijk", `選手名の組み立て失敗: ${rows[0].player}`);
+  console.assert(rows[0].rivals[0].price === 35, "競合入札が価格降順になっていない");
+
+  const sales = flattenLiveSales({
+    20220321: { sales: [{ lastName: "Noble", firstName: "Mark", salePrice: 5, purchasePrice: 8, fromTeam: "t1" }] },
+  });
+  console.assert(sales[0].delta === -3, `損益の計算失敗: ${sales[0].delta}`);
+
+  const teams = buildTeamNames([{ teamsUsers: { t1: { username: "🌟 Gota" } } }]);
+  console.assert(teams.get("t1") === "🌟 Gota", "監督名の解決失敗");
   console.log("self-check OK");
 } else {
   main();
