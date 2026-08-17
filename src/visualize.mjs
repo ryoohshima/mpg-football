@@ -143,13 +143,12 @@ function mercatoRows(list, teams) {
         <td class="num strong">${esc(r.price)}</td>
         <td class="num ${over > 0 ? "over" : over < 0 ? "under" : "muted"}">${over > 0 ? "+" : ""}${esc(over)}</td>
         <td class="rivals">${rivalsText(r.rivals, teams)}</td>
-        <td class="date">${esc(fmtDate(r.date))}</td>
       </tr>`;
     })
     .join("");
 }
 
-const MERCATO_HEAD = `<thead><tr><th></th><th>選手</th><th>獲得監督</th><th class="num">評価額</th><th class="num">落札額</th><th class="num">差</th><th>競合入札</th><th>日付</th></tr></thead>`;
+const MERCATO_HEAD = `<thead><tr><th></th><th>選手</th><th>獲得監督</th><th class="num">評価額</th><th class="num">落札額</th><th class="num">差</th><th>競合入札</th></tr></thead>`;
 
 // フェーズタブ + 各フェーズのテーブル。
 // 「すべて」は全フェーズのパネルを同時表示するだけで、行を重複して持たない
@@ -198,14 +197,13 @@ function liveTable(rows, teams) {
         <td class="num">${esc(r.purchasePrice)}</td>
         <td class="num strong">${esc(r.salePrice)}</td>
         <td class="num ${r.delta > 0 ? "over" : r.delta < 0 ? "under" : "muted"}">${r.delta > 0 ? "+" : ""}${esc(r.delta)}</td>
-        <td class="date">${esc(fmtDate(r.purchaseDate))} → ${esc(fmtDate(r.saleDate))}</td>
       </tr>`,
     )
     .join("");
 
   return `<h4>シーズン中の売却 <small>${rows.length} 件</small></h4>
     <table>
-      <thead><tr><th></th><th>選手</th><th>売却した監督</th><th class="num">購入額</th><th class="num">売却額</th><th class="num">損益</th><th>保有期間</th></tr></thead>
+      <thead><tr><th></th><th>選手</th><th>売却した監督</th><th class="num">購入額</th><th class="num">売却額</th><th class="num">損益</th></tr></thead>
       <tbody>${body}</tbody>
     </table>`;
 }
@@ -221,14 +219,13 @@ function restartTable(purchases, teams) {
         <td>${teamOf(teams, p.fromTeam)}</td>
         <td class="num">${esc(p.quotation)}</td>
         <td class="num strong">${esc(p.purchasePrice)}</td>
-        <td class="date">${esc(fmtDate(p.purchaseDate))}</td>
       </tr>`,
     )
     .join("");
 
   return `<h4>リスタート時の引き継ぎ <small>${purchases.length} 名</small></h4>
     <table>
-      <thead><tr><th></th><th>選手</th><th>保有監督</th><th class="num">評価額</th><th class="num">購入額</th><th>購入日</th></tr></thead>
+      <thead><tr><th></th><th>選手</th><th>保有監督</th><th class="num">評価額</th><th class="num">購入額</th></tr></thead>
       <tbody>${body}</tbody>
     </table>`;
 }
@@ -283,12 +280,11 @@ function historyHtml(playerId, currentDate) {
       <td class="num">\${h.quotation === null ? "-" : Number(h.quotation)}</td>
       <td class="num strong">\${h.price === null ? "-" : Number(h.price)}</td>
       <td class="num \${cls}">\${diff > 0 ? "+" : ""}\${diff}</td>
-      <td class="date">\${escHtml(h.date)}</td>
     </tr>\`;
   }).join("");
   return \`<h6>歴代の評価額と落札額 <small>\${list.length} 回</small></h6>
     <div class="hist-wrap"><table class="hist">
-      <thead><tr><th>シーズン</th><th>F</th><th>獲得監督</th><th class="num">評価額</th><th class="num">落札額</th><th class="num">差</th><th>日付</th></tr></thead>
+      <thead><tr><th>シーズン</th><th>F</th><th>獲得監督</th><th class="num">評価額</th><th class="num">落札額</th><th class="num">差</th></tr></thead>
       <tbody>\${rows}</tbody>
     </table></div>\`;
 }
