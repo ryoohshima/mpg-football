@@ -104,6 +104,72 @@ export function pastSeasonDivisionIds(divisionsIds, currentSeason) {
   return [...ids];
 }
 
+// 移籍の日付から、その取引が属する実シーズンを求める。
+// リーグ戦は8月開幕・翌年5月終了のため、1月の移籍は前年シーズンに属する。
+// 例: 2026-01-06 の移籍 -> season 2025（2025-08 開幕のシーズン）
+export function statsSeasonOf(dateStr) {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.getUTCMonth() + 1 >= 7 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
+}
+
+// history から (選手, シーズン) の組を集める。同じ組は1回だけ取得する
+export function collectPlayerSeasons(history) {
+  const pairs = new Map(); // "playerId|season" -> {playerId, season}
+  const add = (id, date) => {
+    const season = statsSeasonOf(date);
+    if (id && season) pairs.set(`${id}|${season}`, { playerId: id, season });
+  };
+  for (const players of Object.values(history?.mercato ?? {})) {
+    for (const p of Object.values(players ?? {})) add(p?.id, p?.wonBid?.bidDate);
+  }
+  for (const day of Object.values(history?.live ?? {})) {
+    for (const s of day?.sales ?? []) add(s?.id, s?.saleDate);
+  }
+  for (const p of history?.restartingData?.purchases ?? []) add(p?.id, p?.purchaseDate);
+  return [...pairs.values()];
+}
+
+// 64KB のレスポンスから表示に使う集計値だけを抜き出す（1件あたり約 200 バイト）
+export function compactPlayerStats(raw) {
+  const club = Object.values(raw?.stats?.clubs ?? {})[0];
+  const s = club?.stats;
+  if (!s) return null;
+  const key = raw?.stats?.keySeasonStats ?? {};
+  const round = (n) => (typeof n === "number" ? Math.round(n * 100) / 100 : undefined);
+  return {
+    matches: s.totalPlayedMatches ?? 0,
+    started: s.totalStartedMatches ?? 0,
+    minutes: s.totalMinutesPlayed ?? 0,
+    goals: s.totalGoals ?? 0,
+    assists: s.totalGoalAssist ?? 0,
+    shots: s.totalScoringAtt ?? 0,
+    onTarget: s.totalOnTargetScoringAtt ?? 0,
+    yellow: s.totalYellowCard ?? 0,
+    red: s.totalRedCard ?? 0,
+    cleanSheet: s.totalCleanSheet ?? 0,
+    goalsConceded: s.totalGoalsConceded ?? 0,
+    rating: round(s.averageRating),
+    points: key.averagePoints,
+    starterPct: round(key.percentageStarter),
+    quotation: key.quotation,
+  };
+}
+
+// 同時実行数を制限して順に処理する（API への配慮と失敗の局所化）
+async function mapWithLimit(items, limit, fn) {
+  const results = [];
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function main() {
   const env = { ...loadEnv(), ...process.env };
   const token = env.MPG_TOKEN;
@@ -124,13 +190,16 @@ async function main() {
 
   // 過去シーズンのディビジョンをリーグ情報から収集（現行シーズンは未開始で空のことがある）
   const currentSeasons = new Map(); // リーグ略号 -> 現在のシーズン番号
+  const championshipOf = new Map(); // リーグ略号 -> championshipId（選手成績の取得に必要）
   for (const leagueId of new Set([...divisionIds].map(toLeagueId).filter(Boolean))) {
     try {
       const league = await api(`/league/${leagueId}`, token, clientVersion);
       save(leagueId, league);
       for (const id of extractDivisionIds(league)) divisionIds.add(id);
       for (const id of pastSeasonDivisionIds(league.divisionsIds, league.season)) divisionIds.add(id);
-      currentSeasons.set(leagueId.replace(/^mpg_league_/, ""), league.season);
+      const abbr = leagueId.replace(/^mpg_league_/, "");
+      currentSeasons.set(abbr, league.season);
+      if (league.gameSettings?.championshipId) championshipOf.set(abbr, league.gameSettings.championshipId);
     } catch (e) {
       console.warn(`  skip ${leagueId}: ${e.message.split("\n")[0]}`);
     }
@@ -142,6 +211,7 @@ async function main() {
   console.log(`対象ディビジョン(${targets.length}): ${targets.join(", ") || "(なし)"}`);
 
   // 存在しないシーズンは 404 で弾かれるため、失敗は skip して続行する
+  const playerSeasons = new Map(); // "playerId|season" -> {playerId, season, championshipId}
   for (const id of targets) {
     console.log(`division ${id} の移籍データを取得中...`);
     const p = parseDivisionId(id);
@@ -158,11 +228,43 @@ async function main() {
     ];
     for (const [name, path, opts] of jobs) {
       try {
-        save(`${id}__${name}`, await api(path, token, clientVersion, opts));
+        const data = await api(path, token, clientVersion, opts);
+        save(`${id}__${name}`, data);
+        if (name === "history") {
+          const cid = championshipOf.get(p?.league) ?? 2;
+          for (const ps of collectPlayerSeasons(data)) {
+            playerSeasons.set(`${ps.playerId}|${ps.season}`, { ...ps, championshipId: cid });
+          }
+        }
       } catch (e) {
         console.warn(`  skip ${name}: ${e.message.split("\n")[0]}`);
       }
     }
+  }
+
+  // 選手成績（モーダル表示用）。1件 64KB のレスポンスから集計値だけを残す
+  const pairs = [...playerSeasons.values()];
+  if (pairs.length > 0) {
+    console.log(`選手成績を取得中... (${pairs.length} 件)`);
+    const stats = {};
+    let done = 0;
+    let failed = 0;
+    await mapWithLimit(pairs, 8, async ({ playerId, season, championshipId }) => {
+      try {
+        const raw = await api(
+          `/championship-player-stats/${playerId}/championship/${championshipId}/${season}`,
+          token,
+          clientVersion,
+        );
+        const c = compactPlayerStats(raw);
+        if (c) stats[`${playerId}|${season}`] = c;
+      } catch {
+        failed++;
+      }
+      if (++done % 200 === 0) console.log(`  ${done}/${pairs.length}`);
+    });
+    save("player-stats", stats);
+    console.log(`  成績あり ${Object.keys(stats).length} 件 / 取得失敗 ${failed} 件`);
   }
 
   console.log("完了。次は node src/visualize.mjs でござる。");
@@ -193,6 +295,29 @@ if (!isMain) {
 
   const multi = pastSeasonDivisionIds(["mpg_division_X_1_1", "mpg_division_X_1_2"], 1);
   console.assert(multi.length === 2, `複数ディビジョンの扱いが不正: ${multi.length}`);
+
+  // 8月開幕のため、1月の移籍は前年シーズンに属する
+  console.assert(statsSeasonOf("2026-01-06T00:00:00Z") === 2025, "冬の移籍のシーズン判定が誤り");
+  console.assert(statsSeasonOf("2025-08-20T00:00:00Z") === 2025, "夏の移籍のシーズン判定が誤り");
+  console.assert(statsSeasonOf("2022-07-01T00:00:00Z") === 2022, "7月の移籍のシーズン判定が誤り");
+
+  const ps = collectPlayerSeasons({
+    mercato: { 1: { a: { id: "pA", wonBid: { bidDate: "2025-08-20T00:00:00Z" } } } },
+    live: { 20260110: { sales: [{ id: "pA", saleDate: "2026-01-10T00:00:00Z" }] } },
+    restartingData: { purchases: [{ id: "pB", purchaseDate: "2025-08-20T00:00:00Z" }] },
+  });
+  // pA は落札(2025)と売却(2026-01→2025)で同一シーズンのため 1 件に集約される
+  console.assert(ps.length === 2, `(選手,シーズン)の重複排除が不正: ${ps.length}`);
+
+  const compact = compactPlayerStats({
+    stats: {
+      clubs: { c1: { stats: { totalPlayedMatches: 37, totalGoals: 3, averageRating: 4.54054 } } },
+      keySeasonStats: { averagePoints: 472, percentageStarter: 50 },
+    },
+  });
+  console.assert(compact.matches === 37 && compact.goals === 3, "成績の抽出失敗");
+  console.assert(compact.rating === 4.54, `評点の丸め失敗: ${compact.rating}`);
+  console.assert(compactPlayerStats({ stats: { clubs: {} } }) === null, "成績なしの扱いが不正");
   console.log("self-check OK");
 } else {
   main().catch((e) => {
