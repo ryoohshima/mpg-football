@@ -59,10 +59,6 @@ function save(name, data) {
   console.log(`  saved data/${name}.json`);
 }
 
-function readSaved(name) {
-  return JSON.parse(readFileSync(join(ROOT, "data", `${name}.json`), "utf8"));
-}
-
 // dashboard のレスポンスから division id を拾う。
 // tournament / team を除外するため mpg_division_ 始まりのみに限定する
 // （division-ranking はディビジョン専用で、他エンティティを渡すと 400 になる）。
@@ -81,24 +77,31 @@ export function extractDivisionIds(dashboard) {
   return [...ids];
 }
 
-// championshipId は gameSettings 配下にあるが、位置に依存せず拾う
-export function extractChampionshipIds(node, found = new Set()) {
-  if (Array.isArray(node)) {
-    node.forEach((v) => extractChampionshipIds(v, found));
-  } else if (node && typeof node === "object") {
-    for (const [k, v] of Object.entries(node)) {
-      if (k === "championshipId" && typeof v === "number") found.add(v);
-      else extractChampionshipIds(v, found);
-    }
-  }
-  return found;
-}
-
 // mpg_division_PHDHUA3Z_9_1 -> mpg_league_PHDHUA3Z
 // dashboard は現行シーズンしか返さないため、リーグ経由で過去シーズンを辿る
 export function toLeagueId(divisionId) {
   const m = divisionId.match(/^mpg_division_([^_]+)_/);
   return m ? `mpg_league_${m[1]}` : null;
+}
+
+// mpg_division_PHDHUA3Z_9_1 -> { league:"PHDHUA3Z", season:9, division:1 }
+export function parseDivisionId(divisionId) {
+  const m = String(divisionId).match(/^mpg_division_(.+)_(\d+)_(\d+)$/);
+  return m ? { league: m[1], season: Number(m[2]), division: Number(m[3]) } : null;
+}
+
+// league.divisionsIds は現行シーズン分のみ。ID の規則性と league.season（現在のシーズン番号）
+// から過去シーズンの division id を組み立てる。存在しないものは取得時に 404 で弾かれる。
+export function pastSeasonDivisionIds(divisionsIds, currentSeason) {
+  const ids = new Set();
+  for (const id of divisionsIds ?? []) {
+    const p = parseDivisionId(id);
+    if (!p) continue;
+    for (let s = 1; s <= (currentSeason ?? p.season); s++) {
+      ids.add(`mpg_division_${p.league}_${s}_${p.division}`);
+    }
+  }
+  return [...ids];
 }
 
 async function main() {
@@ -120,24 +123,16 @@ async function main() {
   }
 
   // 過去シーズンのディビジョンをリーグ情報から収集（現行シーズンは未開始で空のことがある）
-  const championshipIds = new Set();
+  const currentSeasons = new Map(); // リーグ略号 -> 現在のシーズン番号
   for (const leagueId of new Set([...divisionIds].map(toLeagueId).filter(Boolean))) {
     try {
       const league = await api(`/league/${leagueId}`, token, clientVersion);
       save(leagueId, league);
       for (const id of extractDivisionIds(league)) divisionIds.add(id);
-      for (const cid of extractChampionshipIds(league)) championshipIds.add(cid);
+      for (const id of pastSeasonDivisionIds(league.divisionsIds, league.season)) divisionIds.add(id);
+      currentSeasons.set(leagueId.replace(/^mpg_league_/, ""), league.season);
     } catch (e) {
       console.warn(`  skip ${leagueId}: ${e.message.split("\n")[0]}`);
-    }
-  }
-
-  // 選手プール: transfersExperts 等が返す playerId を名前に解決するために必要
-  for (const cid of championshipIds) {
-    try {
-      save(`players-${cid}`, await api(`/championship-players-pool/${cid}/details`, token, clientVersion));
-    } catch (e) {
-      console.warn(`  skip players-${cid}: ${e.message.split("\n")[0]}`);
     }
   }
 
@@ -146,56 +141,28 @@ async function main() {
     : [...divisionIds];
   console.log(`対象ディビジョン(${targets.length}): ${targets.join(", ") || "(なし)"}`);
 
-  // 移籍関連エンドポイント（実リクエスト捕獲で確認済み）
-  // - traders / transfersExperts / transfersLosers: 完了シーズンの移籍成績ランキング（本命）
-  // - best-available-players: 移籍期間中のディビジョンでのみ意味がある。失敗時は skip
-  const transferPlayerIds = new Set();
+  // 存在しないシーズンは 404 で弾かれるため、失敗は skip して続行する
   for (const id of targets) {
     console.log(`division ${id} の移籍データを取得中...`);
+    const p = parseDivisionId(id);
+    const isCurrentSeason = p && currentSeasons.get(p.league) === p.season;
     const jobs = [
       // 全取引の記録（フェーズ別の入札/落札・シーズン中の売買）。可視化の主データ
       ["history", `/division-history/division/${id}`, { method: "GET" }],
+      // 監督名（teamsUsers）の解決に使う
       ["traders", `/division-ranking/division/${id}/traders?ignoreLive=false`, { method: "GET" }],
-      ["transfers-experts", `/division-ranking/division/${id}/transfersExperts?ignoreLive=false`, { method: "GET" }],
-      ["transfers-losers", `/division-ranking/division/${id}/transfersLosers?ignoreLive=false`, { method: "GET" }],
-      ["best-available-players", `/division/${id}/best-available-players`, { method: "GET" }],
+      // 移籍市場の選手一覧は移籍期間中の現行シーズンでのみ意味がある
+      ...(isCurrentSeason
+        ? [["best-available-players", `/division/${id}/best-available-players`, { method: "GET" }]]
+        : []),
     ];
     for (const [name, path, opts] of jobs) {
       try {
-        const data = await api(path, token, clientVersion, opts);
-        save(`${id}__${name}`, data);
-        for (const r of data.transfersExperts ?? data.transfersLosers ?? []) {
-          if (r?.playerId) transferPlayerIds.add(r.playerId);
-        }
+        save(`${id}__${name}`, await api(path, token, clientVersion, opts));
       } catch (e) {
         console.warn(`  skip ${name}: ${e.message.split("\n")[0]}`);
       }
     }
-  }
-
-  // 選手プールは現行シーズン分のみのため、離脱済みの選手は個別に取得する。
-  // /championship-player/{id} は過去の選手も名前を返す（1件 1KB 未満）。
-  const pooled = new Set();
-  for (const cid of championshipIds) {
-    try {
-      for (const p of readSaved(`players-${cid}`)?.players ?? []) if (p?.id) pooled.add(p.id);
-    } catch {
-      /* プール未取得なら全件を個別取得する */
-    }
-  }
-  const missing = [...transferPlayerIds].filter((id) => !pooled.has(id));
-  if (missing.length > 0) {
-    console.log(`プール未収録の選手 ${missing.length} 件を個別取得中...`);
-    const extra = {};
-    for (const pid of missing) {
-      try {
-        const p = await api(`/championship-player/${pid}`, token, clientVersion);
-        extra[pid] = { id: p.id, firstName: p.firstName, lastName: p.lastName };
-      } catch (e) {
-        console.warn(`  skip ${pid}: ${e.message.split("\n")[0]}`);
-      }
-    }
-    save("players-extra", extra);
   }
 
   console.log("完了。次は node src/visualize.mjs でござる。");
@@ -216,6 +183,16 @@ if (!isMain) {
   console.assert(ids.length === 2, `division 以外を拾っている: ${ids}`);
   console.assert(ids.includes("mpg_division_PHDHUA3Z_9_1"), `division id 抽出失敗: ${ids}`);
   console.assert(toLeagueId("mpg_division_PHDHUA3Z_9_1") === "mpg_league_PHDHUA3Z", "league id 導出失敗");
+
+  const parsed = parseDivisionId("mpg_division_PHDHUA3Z_9_1");
+  console.assert(parsed.league === "PHDHUA3Z" && parsed.season === 9 && parsed.division === 1, "division id の分解失敗");
+
+  const past = pastSeasonDivisionIds(["mpg_division_PHDHUA3Z_9_1"], 9);
+  console.assert(past.length === 9, `過去シーズン分の生成数が不正: ${past.length}`);
+  console.assert(past.includes("mpg_division_PHDHUA3Z_7_1"), "過去シーズンの id 生成失敗");
+
+  const multi = pastSeasonDivisionIds(["mpg_division_X_1_1", "mpg_division_X_1_2"], 1);
+  console.assert(multi.length === 2, `複数ディビジョンの扱いが不正: ${multi.length}`);
   console.log("self-check OK");
 } else {
   main().catch((e) => {
