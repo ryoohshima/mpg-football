@@ -77,6 +77,19 @@ export function extractDivisionIds(dashboard) {
   return [...ids];
 }
 
+// championshipId は gameSettings 配下にあるが、位置に依存せず拾う
+export function extractChampionshipIds(node, found = new Set()) {
+  if (Array.isArray(node)) {
+    node.forEach((v) => extractChampionshipIds(v, found));
+  } else if (node && typeof node === "object") {
+    for (const [k, v] of Object.entries(node)) {
+      if (k === "championshipId" && typeof v === "number") found.add(v);
+      else extractChampionshipIds(v, found);
+    }
+  }
+  return found;
+}
+
 // mpg_division_PHDHUA3Z_9_1 -> mpg_league_PHDHUA3Z
 // dashboard は現行シーズンしか返さないため、リーグ経由で過去シーズンを辿る
 export function toLeagueId(divisionId) {
@@ -103,13 +116,24 @@ async function main() {
   }
 
   // 過去シーズンのディビジョンをリーグ情報から収集（現行シーズンは未開始で空のことがある）
+  const championshipIds = new Set();
   for (const leagueId of new Set([...divisionIds].map(toLeagueId).filter(Boolean))) {
     try {
       const league = await api(`/league/${leagueId}`, token, clientVersion);
       save(leagueId, league);
       for (const id of extractDivisionIds(league)) divisionIds.add(id);
+      for (const cid of extractChampionshipIds(league)) championshipIds.add(cid);
     } catch (e) {
       console.warn(`  skip ${leagueId}: ${e.message.split("\n")[0]}`);
+    }
+  }
+
+  // 選手プール: transfersExperts 等が返す playerId を名前に解決するために必要
+  for (const cid of championshipIds) {
+    try {
+      save(`players-${cid}`, await api(`/championship-players-pool/${cid}/details`, token, clientVersion));
+    } catch (e) {
+      console.warn(`  skip players-${cid}: ${e.message.split("\n")[0]}`);
     }
   }
 
@@ -119,8 +143,8 @@ async function main() {
   console.log(`対象ディビジョン(${targets.length}): ${targets.join(", ") || "(なし)"}`);
 
   // 移籍関連エンドポイント（実リクエスト捕獲で確認済み）
-  // - traders / transfersExperts / transfersLosers: 常時取得できる移籍成績ランキング（本命）
-  // - best-available-players / sales-and-bids: 移籍期間中のみ有効。失敗時は skip
+  // - traders / transfersExperts / transfersLosers: 完了シーズンの移籍成績ランキング（本命）
+  // - best-available-players: 移籍期間中のディビジョンでのみ意味がある。失敗時は skip
   for (const id of targets) {
     console.log(`division ${id} の移籍データを取得中...`);
     const jobs = [
@@ -128,7 +152,6 @@ async function main() {
       ["transfers-experts", `/division-ranking/division/${id}/transfersExperts?ignoreLive=false`, { method: "GET" }],
       ["transfers-losers", `/division-ranking/division/${id}/transfersLosers?ignoreLive=false`, { method: "GET" }],
       ["best-available-players", `/division/${id}/best-available-players`, { method: "GET" }],
-      ["sales-and-bids", `/division/${id}/sales-and-bids`, { method: "POST", body: {} }],
     ];
     for (const [name, path, opts] of jobs) {
       try {
@@ -143,8 +166,13 @@ async function main() {
   console.log("完了。次は node src/visualize.mjs でござる。");
 }
 
+// 直接実行時のみ動かす（import しただけで API を叩かないように）
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+
 // self-check: node src/fetch.mjs --check
-if (process.argv.includes("--check")) {
+if (!isMain) {
+  // モジュールとして読み込まれた場合は何もしない
+} else if (process.argv.includes("--check")) {
   const sample = {
     leagues: [{ divisions: [{ id: "mpg_division_PHDHUA3Z_9_1" }, { id: "mpg_division_NS4H8KEN_2_1" }] }],
     tournaments: [{ id: "mpg_tournament_REPRISE26" }, { id: "mpg_team_P316LP9W_1_1_1" }],
