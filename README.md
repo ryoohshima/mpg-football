@@ -16,10 +16,11 @@ fetch スクリプト（Node.js）
   .env の MPG_TOKEN（Auth0 アクセストークン）
     → /dashboard で現行シーズンのディビジョンを取得
     → /league/{id} で過去シーズンのディビジョンも収集
+    → /league/{id} と id の規則性から過去シーズンの division を全件走査
     → /division-history/division/{id}（全取引の記録・主データ）
-    → /division-ranking/division/{id}/{traders|transfersExperts|transfersLosers}
-    → /championship-players-pool/{id}/details（選手名の解決用・現行シーズン分）
-    → /championship-player/{playerId}（プールに無い過去の選手を個別解決）
+    → /division-ranking/division/{id}/traders（監督名の解決用）
+    → /championship-player-stats/{playerId}/championship/{cid}/{season}
+      （取引のあった選手のシーズン成績。集計値のみ抽出して保存）
   → data/*.json に保存
         ↓
 ビジュアル化（静的 HTML）
@@ -36,15 +37,25 @@ fetch スクリプト（Node.js）
 | `live` | シーズン中の売却。購入額 → 売却額 → 損益 / 保有期間 |
 | `restartingData` | リスタート時の保有引き継ぎ |
 
-補助データ（ランキングの抜粋。監督名の解決にも使う）:
+補助データ:
 
 | 種別 | 内容 |
 |---|---|
-| `traders` | チームの資産価値の伸び |
-| `transfersExperts` / `transfersLosers` | 儲かった / 損した移籍の上位数件 |
-| `best-available-players` | 移籍市場の選手（移籍期間中のディビジョンのみ） |
+| `traders` | チームの資産価値の伸び。`teamsUsers` から監督名を解決する |
+| `player-stats` | 取引のあった選手のシーズン成績（モーダル表示用） |
+| `best-available-players` | 移籍市場の選手（移籍期間中の現行シーズンのみ） |
 
 いずれも**完了済みシーズン**のディビジョンでのみ返る。未開始シーズンは 404 / 500 になるため skip される。
+
+## 画面の使い方
+
+- **リーグ/シーズンのタブ**で表示を切り替える
+- **フェーズのタブ**で落札を絞り込む（「すべて」で全フェーズ表示）
+- **選手名をクリック**すると、その取引が属するシーズンの成績をモーダル表示（出場 / 先発 / 出場時間 / 平均評点 / 得点 / アシストなど）
+
+### シーズンの対応について
+
+リーグ戦は8月開幕・翌年5月終了のため、成績を引く際のシーズンは「1月の移籍は前年シーズン」として扱う（例: 2026-01 の移籍 → 2025-26 シーズンの成績）。
 
 ## 技術スタック
 
