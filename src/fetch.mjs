@@ -77,6 +77,13 @@ export function extractDivisionIds(dashboard) {
   return [...ids];
 }
 
+// mpg_division_PHDHUA3Z_9_1 -> mpg_league_PHDHUA3Z
+// dashboard は現行シーズンしか返さないため、リーグ経由で過去シーズンを辿る
+export function toLeagueId(divisionId) {
+  const m = divisionId.match(/^mpg_division_([^_]+)_/);
+  return m ? `mpg_league_${m[1]}` : null;
+}
+
 async function main() {
   const env = { ...loadEnv(), ...process.env };
   const token = env.MPG_TOKEN;
@@ -90,12 +97,26 @@ async function main() {
   const dashboard = await api("/dashboard", token, clientVersion);
   save("dashboard", dashboard);
 
-  const divisionIds = extractDivisionIds(dashboard);
-  if (divisionIds.length === 0) {
+  const divisionIds = new Set(extractDivisionIds(dashboard));
+  if (divisionIds.size === 0) {
     console.warn("dashboard から division id を特定できず。data/dashboard.json を確認し、必要なら MPG_DIVISION_ID を .env に設定してくだされ。");
   }
-  const targets = env.MPG_DIVISION_ID ? [env.MPG_DIVISION_ID] : divisionIds;
-  console.log(`対象ディビジョン: ${targets.join(", ") || "(なし)"}`);
+
+  // 過去シーズンのディビジョンをリーグ情報から収集（現行シーズンは未開始で空のことがある）
+  for (const leagueId of new Set([...divisionIds].map(toLeagueId).filter(Boolean))) {
+    try {
+      const league = await api(`/league/${leagueId}`, token, clientVersion);
+      save(leagueId, league);
+      for (const id of extractDivisionIds(league)) divisionIds.add(id);
+    } catch (e) {
+      console.warn(`  skip ${leagueId}: ${e.message.split("\n")[0]}`);
+    }
+  }
+
+  const targets = env.MPG_DIVISION_ID
+    ? env.MPG_DIVISION_ID.split(",").map((s) => s.trim()).filter(Boolean)
+    : [...divisionIds];
+  console.log(`対象ディビジョン(${targets.length}): ${targets.join(", ") || "(なし)"}`);
 
   // 移籍関連エンドポイント（実リクエスト捕獲で確認済み）
   // - traders / transfersExperts / transfersLosers: 常時取得できる移籍成績ランキング（本命）
@@ -124,9 +145,14 @@ async function main() {
 
 // self-check: node src/fetch.mjs --check
 if (process.argv.includes("--check")) {
-  const sample = { leagues: [{ divisions: [{ id: "mpg_division_A" }, { id: "mpg_division_B" }] }] };
+  const sample = {
+    leagues: [{ divisions: [{ id: "mpg_division_PHDHUA3Z_9_1" }, { id: "mpg_division_NS4H8KEN_2_1" }] }],
+    tournaments: [{ id: "mpg_tournament_REPRISE26" }, { id: "mpg_team_P316LP9W_1_1_1" }],
+  };
   const ids = extractDivisionIds(sample);
-  console.assert(ids.includes("mpg_division_A") && ids.includes("mpg_division_B"), `division id 抽出失敗: ${ids}`);
+  console.assert(ids.length === 2, `division 以外を拾っている: ${ids}`);
+  console.assert(ids.includes("mpg_division_PHDHUA3Z_9_1"), `division id 抽出失敗: ${ids}`);
+  console.assert(toLeagueId("mpg_division_PHDHUA3Z_9_1") === "mpg_league_PHDHUA3Z", "league id 導出失敗");
   console.log("self-check OK");
 } else {
   main().catch((e) => {
