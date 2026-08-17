@@ -1,97 +1,154 @@
 // MPG 移籍データ可視化スクリプト（静的 HTML 生成）
 //
-// data/*.json を読み込み、選手リストを自動検出して dist/index.html を生成する。
-// 取得 JSON の構造に依存しないよう、キー名のパターンから表示軸を推定する。
+// data/*.json を読み込み、ディビジョンごとに以下を描画する。
+//   - traders:           チームの資産価値の伸び（初期値 → 現在値、delta 順）
+//   - transfersExperts:  儲かった移籍 上位（購入額 → 売却額）
+//   - transfersLosers:   損した移籍 上位
+// teamId はユーザー名に、playerId は選手名に解決する。
 //
 // 使い方: node src/visualize.mjs && open dist/index.html
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const DATA = join(ROOT, "data");
 
-// JSON から「オブジェクトの配列」を最長のものとして拾い、選手リストと見なす
-export function findPlayerList(json) {
-  let best = [];
-  const walk = (node) => {
-    if (Array.isArray(node)) {
-      if (node.length > best.length && node.every((x) => x && typeof x === "object" && !Array.isArray(x))) best = node;
-      node.forEach(walk);
-    } else if (node && typeof node === "object") {
-      Object.values(node).forEach(walk);
+const esc = (s) =>
+  String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+// 選手プール（players-*.json）から playerId -> 表示名 の辞書を作る
+export function buildPlayerNames(pools) {
+  const names = new Map();
+  for (const pool of pools) {
+    for (const p of pool?.players ?? []) {
+      if (p?.id) names.set(p.id, [p.firstName, p.lastName].filter(Boolean).join(" ") || p.id);
     }
-  };
-  walk(json);
-  return best;
-}
-
-// 選手オブジェクトから表示名と数値軸（価格等）のキーを推定
-export function detectFields(rows) {
-  if (rows.length === 0) return { nameKey: null, valueKey: null };
-  const keys = Object.keys(rows[0]);
-  const nameKey =
-    keys.find((k) => /(^|_)(last_?name|full_?name|player_?name|^name)$/i.test(k)) ??
-    keys.find((k) => /name/i.test(k) && typeof rows[0][k] === "string") ??
-    keys.find((k) => typeof rows[0][k] === "string");
-  const numericKeys = keys.filter((k) => rows.every((r) => typeof r[k] === "number"));
-  const valueKey =
-    numericKeys.find((k) => /(price|value|quotation|amount|bid|cost)/i.test(k)) ?? numericKeys[0] ?? null;
-  return { nameKey, valueKey };
-}
-
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-
-function renderSection(title, rows) {
-  const { nameKey, valueKey } = detectFields(rows);
-  const keys = rows.length ? Object.keys(rows[0]) : [];
-
-  let bars = "";
-  if (nameKey && valueKey) {
-    const sorted = [...rows].sort((a, b) => (b[valueKey] ?? 0) - (a[valueKey] ?? 0)).slice(0, 20);
-    const max = Math.max(1, ...sorted.map((r) => r[valueKey] ?? 0));
-    bars = sorted
-      .map((r) => {
-        const w = Math.round(((r[valueKey] ?? 0) / max) * 100);
-        return `<div class="bar-row"><span class="bar-label" title="${esc(r[nameKey])}">${esc(r[nameKey])}</span>
-          <span class="bar-track"><span class="bar-fill" style="width:${w}%"></span></span>
-          <span class="bar-val">${esc(r[valueKey])}</span></div>`;
-      })
-      .join("");
-    bars = `<h3>上位 ${sorted.length} 件（${esc(valueKey)}）</h3><div class="bars">${bars}</div>`;
   }
+  return names;
+}
 
-  const thead = keys.map((k) => `<th>${esc(k)}</th>`).join("");
-  const tbody = rows
-    .map((r) => `<tr>${keys.map((k) => `<td>${esc(typeof r[k] === "object" ? JSON.stringify(r[k]) : r[k] ?? "")}</td>`).join("")}</tr>`)
+// teamsUsers から teamId -> ユーザー名 の辞書を作る
+export function buildTeamNames(teamsUsers) {
+  const names = new Map();
+  for (const [teamId, user] of Object.entries(teamsUsers ?? {})) {
+    names.set(teamId, user?.username || user?.firstName || teamId);
+  }
+  return names;
+}
+
+const readJson = (f) => JSON.parse(readFileSync(join(DATA, f), "utf8"));
+const fmtDate = (s) => (s ? String(s).slice(0, 10) : "");
+
+// 選手プールは現行シーズン分のみのため、既にリーグを去った選手は解決できない。
+// 捏造せず ID を読みやすく表示する。
+export function playerLabel(playerId, players) {
+  const name = players.get(playerId);
+  if (name) return { text: name, unknown: false };
+  const num = String(playerId).replace(/^mpg_championship_player_/, "");
+  return { text: `選手 #${num}`, unknown: true };
+}
+
+// 左右に伸びる棒（正負両方向）。max は絶対値の最大。
+function deltaBar(delta, max) {
+  const w = max > 0 ? Math.round((Math.abs(delta) / max) * 50) : 0;
+  const pos = delta >= 0;
+  return `<span class="dbar">
+    <span class="dbar-half left">${pos ? "" : `<span class="fill neg" style="width:${w * 2}%"></span>`}</span>
+    <span class="dbar-half right">${pos ? `<span class="fill pos" style="width:${w * 2}%"></span>` : ""}</span>
+  </span>`;
+}
+
+function tradersSection(data) {
+  const rows = data.traders ?? [];
+  if (rows.length === 0) return "";
+  const teams = buildTeamNames(data.teamsUsers);
+  const max = Math.max(1, ...rows.map((r) => Math.abs(r.delta ?? 0)));
+  const maxVal = Math.max(1, ...rows.map((r) => Math.max(r.initialSquadValue ?? 0, r.currentSquadValue ?? 0)));
+
+  const body = [...rows]
+    .sort((a, b) => (b.delta ?? 0) - (a.delta ?? 0))
+    .map((r) => {
+      const init = Math.round(((r.initialSquadValue ?? 0) / maxVal) * 100);
+      const curr = Math.round(((r.currentSquadValue ?? 0) / maxVal) * 100);
+      return `<tr>
+        <th scope="row">${esc(teams.get(r.teamId) ?? r.teamId)}</th>
+        <td class="num">${esc(r.initialSquadValue)}</td>
+        <td class="num">${esc(r.currentSquadValue)}</td>
+        <td class="growth">
+          <span class="track"><span class="fill base" style="width:${init}%"></span><span class="fill grow" style="width:${Math.max(0, curr - init)}%"></span></span>
+        </td>
+        <td class="num ${(r.delta ?? 0) >= 0 ? "up" : "down"}">${(r.delta ?? 0) >= 0 ? "+" : ""}${esc(r.delta)}</td>
+        <td class="delta">${deltaBar(r.delta ?? 0, max)}</td>
+      </tr>`;
+    })
     .join("");
 
-  return `<section><h2>${esc(title)} <small>(${rows.length} 件)</small></h2>
-    ${bars}
-    <details><summary>全データを表で見る</summary>
-      <div class="table-wrap"><table><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table></div>
-    </details></section>`;
+  return `<h3>チーム資産価値の伸び <small>${rows.length} チーム</small></h3>
+    <table>
+      <thead><tr><th>監督</th><th class="num">初期値</th><th class="num">現在値</th><th>推移</th><th class="num">増減</th><th>増減幅</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+function transfersSection(rows, teamsUsers, players, title, limit = 10) {
+  if (!rows || rows.length === 0) return "";
+  const teams = buildTeamNames(teamsUsers);
+  const max = Math.max(1, ...rows.map((r) => Math.abs(r.delta ?? 0)));
+
+  const body = [...rows]
+    .sort((a, b) => Math.abs(b.delta ?? 0) - Math.abs(a.delta ?? 0))
+    .slice(0, limit)
+    .map((r) => {
+      const p = playerLabel(r.playerId, players);
+      return `<tr>
+        <th scope="row" class="${p.unknown ? "unknown" : ""}">${esc(p.text)}</th>
+        <td>${esc(teams.get(r.teamId) ?? r.teamId)}</td>
+        <td class="num">${esc(r.purchasePrice)}</td>
+        <td class="num">${esc(r.salePrice)}</td>
+        <td class="num ${(r.delta ?? 0) >= 0 ? "up" : "down"}">${(r.delta ?? 0) >= 0 ? "+" : ""}${esc(r.delta)}</td>
+        <td class="delta">${deltaBar(r.delta ?? 0, max)}</td>
+        <td class="date">${esc(fmtDate(r.purchaseDate))} → ${esc(fmtDate(r.saleDate))}</td>
+      </tr>`;
+    })
+    .join("");
+
+  return `<h3>${esc(title)} <small>上位 ${Math.min(limit, rows.length)} / ${rows.length} 件</small></h3>
+    <table>
+      <thead><tr><th>選手</th><th>監督</th><th class="num">購入</th><th class="num">売却</th><th class="num">損益</th><th>損益幅</th><th>期間</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
 }
 
 function main() {
-  const dataDir = join(ROOT, "data");
-  let files;
-  try {
-    files = readdirSync(dataDir).filter((f) => f.endsWith(".json") && f !== "dashboard.json");
-  } catch {
+  if (!existsSync(DATA)) {
     console.error("data/ が無いでござる。先に node src/fetch.mjs を実行してくだされ。");
     process.exit(1);
   }
-  if (files.length === 0) {
-    console.error("data/ に移籍データが無い。先に node src/fetch.mjs を実行してくだされ。");
-    process.exit(1);
+  const files = readdirSync(DATA).filter((f) => f.endsWith(".json"));
+  const players = buildPlayerNames(files.filter((f) => f.startsWith("players-")).map(readJson));
+
+  // ディビジョンごとに traders / experts / losers をまとめる
+  const divisions = new Map();
+  for (const f of files) {
+    const m = f.match(/^(mpg_division_[^_]+_\d+_\d+)__(traders|transfers-experts|transfers-losers)\.json$/);
+    if (!m) continue;
+    if (!divisions.has(m[1])) divisions.set(m[1], {});
+    divisions.get(m[1])[m[2]] = readJson(f);
   }
 
-  const sections = files
-    .map((f) => {
-      const json = JSON.parse(readFileSync(join(dataDir, f), "utf8"));
-      const rows = findPlayerList(json);
-      return rows.length ? renderSection(f.replace(/\.json$/, ""), rows) : "";
+  const sections = [...divisions.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([id, d]) => {
+      const teamsUsers = d.traders?.teamsUsers ?? d["transfers-experts"]?.teamsUsers ?? {};
+      const parts = [
+        d.traders ? tradersSection(d.traders) : "",
+        transfersSection(d["transfers-experts"]?.transfersExperts, d["transfers-experts"]?.teamsUsers ?? teamsUsers, players, "儲かった移籍"),
+        transfersSection(d["transfers-losers"]?.transfersLosers, d["transfers-losers"]?.teamsUsers ?? teamsUsers, players, "損した移籍"),
+      ].filter(Boolean);
+      if (parts.length === 0) return "";
+      return `<section><h2>${esc(id.replace(/^mpg_division_/, ""))}</h2>${parts.join("\n")}</section>`;
     })
     .filter(Boolean)
     .join("\n");
@@ -101,42 +158,70 @@ function main() {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MPG 移籍データ</title>
 <style>
-  :root{--bg:#ffffff;--ink:#1a1a1a;--muted:#6b7280;--line:#e5e7eb;--surface:#f9fafb;--accent:#3b82f6}
-  @media(prefers-color-scheme:dark){:root{--bg:#0f1115;--ink:#e6e6e6;--muted:#9aa0a6;--line:#2a2d34;--surface:#171a21;--accent:#60a5fa}}
+  :root{--bg:#fff;--ink:#1a1a1a;--muted:#6b7280;--line:#e5e7eb;--surface:#f3f4f6;
+        --base:#94a3b8;--grow:#3b82f6;--pos:#2563eb;--neg:#dc2626}
+  @media(prefers-color-scheme:dark){:root{--bg:#0f1115;--ink:#e6e6e6;--muted:#9aa0a6;--line:#2a2d34;--surface:#1c1f26;
+        --base:#64748b;--grow:#60a5fa;--pos:#60a5fa;--neg:#f87171}}
   *{box-sizing:border-box}
-  body{margin:0;padding:24px;font:15px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--ink);max-width:960px;margin-inline:auto}
-  h1{font-size:22px}small{color:var(--muted);font-weight:400}
-  section{margin:32px 0;padding-top:8px;border-top:1px solid var(--line)}
-  .bars{display:flex;flex-direction:column;gap:6px;margin:12px 0}
-  .bar-row{display:grid;grid-template-columns:160px 1fr 64px;align-items:center;gap:8px}
-  .bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
-  .bar-track{background:var(--surface);border-radius:4px;height:16px;overflow:hidden}
-  .bar-fill{display:block;height:100%;background:var(--accent);border-radius:4px}
-  .bar-val{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
-  .table-wrap{overflow-x:auto}
-  table{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}
-  th,td{padding:4px 8px;border:1px solid var(--line);text-align:left;white-space:nowrap}
-  th{background:var(--surface)}
-  details{margin-top:8px}summary{cursor:pointer;color:var(--accent)}
+  body{margin:0 auto;padding:24px;max-width:1000px;font:15px/1.6 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  h1{font-size:22px;margin-bottom:4px}
+  h2{font-size:17px;margin:28px 0 4px;padding-top:20px;border-top:1px solid var(--line)}
+  h3{font-size:14px;font-weight:600;margin:20px 0 6px;color:var(--muted)}
+  small{color:var(--muted);font-weight:400}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{padding:5px 8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  thead th{color:var(--muted);font-weight:500;font-size:12px}
+  tbody th{font-weight:500}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .up{color:var(--pos)}.down{color:var(--neg)}
+  .date{color:var(--muted);font-size:12px}
+  .growth{width:34%;min-width:120px}
+  .track{display:flex;height:12px;background:var(--surface);border-radius:4px;overflow:hidden}
+  .fill{display:block;height:100%}
+  .fill.base{background:var(--base)}
+  .fill.grow{background:var(--grow)}
+  .delta{width:110px}
+  .dbar{display:flex;height:12px;align-items:center}
+  .dbar-half{flex:1;display:flex;height:100%;background:var(--surface)}
+  .dbar-half.left{justify-content:flex-end;border-radius:4px 0 0 4px}
+  .dbar-half.right{border-radius:0 4px 4px 0}
+  .fill.pos{background:var(--pos);border-radius:0 4px 4px 0}
+  .fill.neg{background:var(--neg);border-radius:4px 0 0 4px}
+  .legend{color:var(--muted);font-size:12px;margin-top:2px}
+  .legend b{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle}
+  .unknown{color:var(--muted);font-weight:400}
+  .note{color:var(--muted);font-size:12px;margin-top:24px;padding-top:12px;border-top:1px solid var(--line)}
 </style></head>
 <body>
 <h1>MPG 移籍データ <small>スナップショット</small></h1>
-${sections || "<p>表示できる選手リストが見つからなかったでござる。data/ の中身を確認してくだされ。</p>"}
+<p class="legend">
+  推移: <b style="background:var(--base)"></b> 初期値 / <b style="background:var(--grow)"></b> 増加分 ・
+  損益: <b style="background:var(--pos)"></b> プラス / <b style="background:var(--neg)"></b> マイナス
+</p>
+${sections || "<p>移籍ランキングのデータが見つからなかったでござる。完了済みシーズンのディビジョンを取得してくだされ。</p>"}
+<p class="note">「選手 #12345」はリーグを去った選手。MPG の選手プール API は現行シーズン分のみを返すため、過去の移籍相手の名前は解決できない。</p>
 </body></html>`;
 
   mkdirSync(join(ROOT, "dist"), { recursive: true });
   writeFileSync(join(ROOT, "dist", "index.html"), html);
-  console.log("生成完了: dist/index.html");
+  console.log(`生成完了: dist/index.html（ディビジョン ${divisions.size} 件）`);
 }
 
-// self-check: node src/visualize.mjs --check
-if (process.argv.includes("--check")) {
-  const sample = { data: { players: [{ lastName: "Mbappé", position: "A", price: 90 }, { lastName: "Haaland", position: "A", price: 88 }] } };
-  const rows = findPlayerList(sample);
-  console.assert(rows.length === 2, "findPlayerList が選手配列を検出できていない");
-  const { nameKey, valueKey } = detectFields(rows);
-  console.assert(nameKey === "lastName", `nameKey 誤検出: ${nameKey}`);
-  console.assert(valueKey === "price", `valueKey 誤検出: ${valueKey}`);
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+
+if (!isMain) {
+  // モジュールとして読み込まれた場合は何もしない
+} else if (process.argv.includes("--check")) {
+  const names = buildPlayerNames([{ players: [{ id: "p1", firstName: "Kylian", lastName: "Mbappé" }] }]);
+  console.assert(names.get("p1") === "Kylian Mbappé", `選手名の解決失敗: ${names.get("p1")}`);
+  const teams = buildTeamNames({ t1: { username: "🌟 Gota", firstName: "Gota" }, t2: { firstName: "oga" } });
+  console.assert(teams.get("t1") === "🌟 Gota" && teams.get("t2") === "oga", "チーム名の解決失敗");
+  console.assert(deltaBar(-10, 20).includes("neg"), "負の delta が負方向に描画されていない");
+  console.assert(deltaBar(10, 20).includes("pos"), "正の delta が正方向に描画されていない");
+  const known = playerLabel("p1", names);
+  const unknown = playerLabel("mpg_championship_player_101668", names);
+  console.assert(known.text === "Kylian Mbappé" && !known.unknown, "既知選手のラベル失敗");
+  console.assert(unknown.text === "選手 #101668" && unknown.unknown, `未収録選手のラベル失敗: ${unknown.text}`);
   console.log("self-check OK");
 } else {
   main();
