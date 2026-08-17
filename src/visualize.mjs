@@ -18,13 +18,17 @@ const DATA = join(ROOT, "data");
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
-// 選手プール（players-*.json）から playerId -> 表示名 の辞書を作る
-export function buildPlayerNames(pools) {
+// 選手プール（players-*.json）と個別取得分（players-extra.json）から
+// playerId -> 表示名 の辞書を作る。
+// プールは { players: [...] }、個別取得分は { [id]: {...} } の形。
+export function buildPlayerNames(sources) {
   const names = new Map();
-  for (const pool of pools) {
-    for (const p of pool?.players ?? []) {
-      if (p?.id) names.set(p.id, [p.firstName, p.lastName].filter(Boolean).join(" ") || p.id);
-    }
+  const add = (p) => {
+    if (p?.id) names.set(p.id, [p.firstName, p.lastName].filter(Boolean).join(" ") || p.id);
+  };
+  for (const src of sources) {
+    if (Array.isArray(src?.players)) src.players.forEach(add);
+    else if (src && typeof src === "object") Object.values(src).forEach(add);
   }
   return names;
 }
@@ -199,7 +203,7 @@ function main() {
   損益: <b style="background:var(--pos)"></b> プラス / <b style="background:var(--neg)"></b> マイナス
 </p>
 ${sections || "<p>移籍ランキングのデータが見つからなかったでござる。完了済みシーズンのディビジョンを取得してくだされ。</p>"}
-<p class="note">「選手 #12345」はリーグを去った選手。MPG の選手プール API は現行シーズン分のみを返すため、過去の移籍相手の名前は解決できない。</p>
+<p class="note">選手名は現行シーズンの選手プールで解決し、載っていない選手（既にリーグを去った選手）は個別に取得している。それでも引けなかった場合のみ ID を表示する。</p>
 </body></html>`;
 
   mkdirSync(join(ROOT, "dist"), { recursive: true });
@@ -212,8 +216,12 @@ const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.arg
 if (!isMain) {
   // モジュールとして読み込まれた場合は何もしない
 } else if (process.argv.includes("--check")) {
-  const names = buildPlayerNames([{ players: [{ id: "p1", firstName: "Kylian", lastName: "Mbappé" }] }]);
-  console.assert(names.get("p1") === "Kylian Mbappé", `選手名の解決失敗: ${names.get("p1")}`);
+  const names = buildPlayerNames([
+    { players: [{ id: "p1", firstName: "Kylian", lastName: "Mbappé" }] },
+    { p2: { id: "p2", firstName: "Jamie", lastName: "Vardy" } }, // players-extra.json の形
+  ]);
+  console.assert(names.get("p1") === "Kylian Mbappé", `プール由来の選手名の解決失敗: ${names.get("p1")}`);
+  console.assert(names.get("p2") === "Jamie Vardy", `個別取得分の選手名の解決失敗: ${names.get("p2")}`);
   const teams = buildTeamNames({ t1: { username: "🌟 Gota", firstName: "Gota" }, t2: { firstName: "oga" } });
   console.assert(teams.get("t1") === "🌟 Gota" && teams.get("t2") === "oga", "チーム名の解決失敗");
   console.assert(deltaBar(-10, 20).includes("neg"), "負の delta が負方向に描画されていない");

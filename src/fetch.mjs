@@ -59,6 +59,10 @@ function save(name, data) {
   console.log(`  saved data/${name}.json`);
 }
 
+function readSaved(name) {
+  return JSON.parse(readFileSync(join(ROOT, "data", `${name}.json`), "utf8"));
+}
+
 // dashboard のレスポンスから division id を拾う。
 // tournament / team を除外するため mpg_division_ 始まりのみに限定する
 // （division-ranking はディビジョン専用で、他エンティティを渡すと 400 になる）。
@@ -145,6 +149,7 @@ async function main() {
   // 移籍関連エンドポイント（実リクエスト捕獲で確認済み）
   // - traders / transfersExperts / transfersLosers: 完了シーズンの移籍成績ランキング（本命）
   // - best-available-players: 移籍期間中のディビジョンでのみ意味がある。失敗時は skip
+  const transferPlayerIds = new Set();
   for (const id of targets) {
     console.log(`division ${id} の移籍データを取得中...`);
     const jobs = [
@@ -157,10 +162,38 @@ async function main() {
       try {
         const data = await api(path, token, clientVersion, opts);
         save(`${id}__${name}`, data);
+        for (const r of data.transfersExperts ?? data.transfersLosers ?? []) {
+          if (r?.playerId) transferPlayerIds.add(r.playerId);
+        }
       } catch (e) {
         console.warn(`  skip ${name}: ${e.message.split("\n")[0]}`);
       }
     }
+  }
+
+  // 選手プールは現行シーズン分のみのため、離脱済みの選手は個別に取得する。
+  // /championship-player/{id} は過去の選手も名前を返す（1件 1KB 未満）。
+  const pooled = new Set();
+  for (const cid of championshipIds) {
+    try {
+      for (const p of readSaved(`players-${cid}`)?.players ?? []) if (p?.id) pooled.add(p.id);
+    } catch {
+      /* プール未取得なら全件を個別取得する */
+    }
+  }
+  const missing = [...transferPlayerIds].filter((id) => !pooled.has(id));
+  if (missing.length > 0) {
+    console.log(`プール未収録の選手 ${missing.length} 件を個別取得中...`);
+    const extra = {};
+    for (const pid of missing) {
+      try {
+        const p = await api(`/championship-player/${pid}`, token, clientVersion);
+        extra[pid] = { id: p.id, firstName: p.firstName, lastName: p.lastName };
+      } catch (e) {
+        console.warn(`  skip ${pid}: ${e.message.split("\n")[0]}`);
+      }
+    }
+    save("players-extra", extra);
   }
 
   console.log("完了。次は node src/visualize.mjs でござる。");
