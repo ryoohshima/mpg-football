@@ -59,16 +59,18 @@ function save(name, data) {
   console.log(`  saved data/${name}.json`);
 }
 
-// dashboard のレスポンスから division id を柔軟に拾う（構造差分に強くする）
+// dashboard のレスポンスから division id を拾う。
+// tournament / team を除外するため mpg_division_ 始まりのみに限定する
+// （division-ranking はディビジョン専用で、他エンティティを渡すと 400 になる）。
 export function extractDivisionIds(dashboard) {
   const ids = new Set();
   const walk = (node) => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) return node.forEach(walk);
-    for (const [k, v] of Object.entries(node)) {
-      if ((k === "divisionId" || k === "id") && typeof v === "string" && /division|mpg/i.test(v)) ids.add(v);
-      if (k === "divisions" && Array.isArray(v)) for (const d of v) if (d?.id) ids.add(d.id);
-      walk(v);
+    if (typeof node === "string") {
+      if (/^mpg_division_/.test(node)) ids.add(node);
+    } else if (Array.isArray(node)) {
+      node.forEach(walk);
+    } else if (node && typeof node === "object") {
+      Object.values(node).forEach(walk);
     }
   };
   walk(dashboard);
