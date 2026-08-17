@@ -13,12 +13,27 @@ MPG のページが内部で利用している API から移籍データを取�
 
 ```
 fetch スクリプト（Node.js）
-  .env の認証情報 → ログイン → トークン取得 → 移籍データ取得
+  .env の MPG_TOKEN（Auth0 アクセストークン）
+    → /dashboard で現行シーズンのディビジョンを取得
+    → /league/{id} で過去シーズンのディビジョンも収集
+    → /division-ranking/division/{id}/{traders|transfersExperts|transfersLosers}
+    → /championship-players-pool/{id}/details（選手名の解決用）
   → data/*.json に保存
         ↓
 ビジュアル化（静的 HTML）
-  JSON を読み込みチャートを描画
+  JSON を読み込み dist/index.html を生成
 ```
+
+## 取得できるデータ
+
+| 種別 | 内容 |
+|---|---|
+| `traders` | チームの資産価値の伸び（初期値 / 現在値 / 増減） |
+| `transfersExperts` | 儲かった移籍（購入額 → 売却額 → 損益） |
+| `transfersLosers` | 損した移籍 |
+| `best-available-players` | 移籍市場の選手（移籍期間中のディビジョンのみ） |
+
+移籍ランキングは**完了済みシーズン**のディビジョンでのみ返る。未開始シーズンは 500 になるため skip される。
 
 ## 技術スタック
 
@@ -37,17 +52,18 @@ cp .env.example .env
 
 ```sh
 # 移籍データを取得して data/ に保存
-node src/fetch.mjs
+pnpm run fetch
 
 # 可視化ページを生成して開く
-node src/visualize.mjs
-open dist/index.html
-```
+pnpm run visualize && open dist/index.html
 
-※ コマンドは実装の進行に合わせて更新する。
+# ロジックの自己チェック
+pnpm run check
+```
 
 ## 注意事項
 
 - MPG の API は非公式利用のため、仕様変更で動かなくなる可能性がある
-- `.env`（ログイン情報）は絶対にコミットしない
+- `.env`（アクセストークン）は絶対にコミットしない。トークンは数時間で失効する
+- 選手プール API は現行シーズンの選手しか返さないため、過去の移籍相手でリーグを去った選手は名前を解決できず「選手 #ID」と表示される
 - 取得データは私的利用の範囲に留める
