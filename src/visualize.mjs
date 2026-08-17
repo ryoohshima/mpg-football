@@ -126,6 +126,23 @@ export function buildPlayerHistory(entries, labelOf) {
   return Object.fromEntries(byPlayer);
 }
 
+// ポジション絞り込み。行の data-pos を CSS で出し分けるため、行を重複させない
+export function posFilter(entry) {
+  const counts = new Map();
+  for (const r of entry.mercato) counts.set(r.position, (counts.get(r.position) ?? 0) + 1);
+  const present = [1, 2, 3, 4].filter((p) => counts.has(p));
+  if (present.length <= 1) return "";
+
+  const buttons = [
+    `<button class="tab pos-tab active" data-pos="0">全ポジション <span class="count">${entry.mercato.length}</span></button>`,
+    ...present.map(
+      (p) =>
+        `<button class="tab pos-tab" data-pos="${p}">${posTag(p)} <span class="count">${counts.get(p)}</span></button>`,
+    ),
+  ].join("");
+  return `<div class="tabs sub pos">${buttons}</div>`;
+}
+
 function rivalsText(rivals, teams) {
   if (!rivals || rivals.length === 0) return '<span class="muted">単独</span>';
   return rivals.map((b) => `${teamOf(teams, b.teamId)} <span class="muted">${esc(b.price)}</span>`).join(" / ");
@@ -135,7 +152,7 @@ function mercatoRows(list, teams) {
   return list
     .map((r) => {
       const over = (r.price ?? 0) - (r.quotation ?? 0);
-      return `<tr>
+      return `<tr data-pos="${r.position ?? 0}">
         <td>${posTag(r.position)}</td>
         ${playerCell(r)}
         <td>${teamOf(teams, r.teamId)}</td>
@@ -190,7 +207,7 @@ function liveTable(rows, teams) {
   if (rows.length === 0) return "";
   const body = rows
     .map(
-      (r) => `<tr>
+      (r) => `<tr data-pos="${r.position ?? 0}">
         <td>${posTag(r.position)}</td>
         ${playerCell(r)}
         <td>${teamOf(teams, r.teamId)}</td>
@@ -213,7 +230,7 @@ function restartTable(purchases, teams) {
   const body = [...purchases]
     .sort((a, b) => (b.purchasePrice ?? 0) - (a.purchasePrice ?? 0))
     .map(
-      (p) => `<tr>
+      (p) => `<tr data-pos="${p.position ?? 0}">
         <td>${posTag(p.position)}</td>
         <th scope="row">${esc(playerName(p))}</th>
         <td>${teamOf(teams, p.fromTeam)}</td>
@@ -322,6 +339,13 @@ document.addEventListener("click", (e) => {
   if (!tab) return;
   tab.closest(".tabs").querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
   tab.classList.add("active");
+
+  // ポジション絞り込みは属性を変えるだけ。表示制御は CSS が行う
+  if (tab.classList.contains("pos-tab")) {
+    tab.closest(".season-panel").dataset.posfilter = tab.dataset.pos;
+    return;
+  }
+
   const target = tab.dataset.target;
 
   if (tab.classList.contains("phase-tab")) {
@@ -399,8 +423,9 @@ function main() {
         liveTable(e.live, e.teams),
         restartTable(e.restarting, e.teams),
       ].filter(Boolean);
-      return `<div class="season-panel${i === 0 ? " active" : ""}" id="s-${e.id}">
+      return `<div class="season-panel${i === 0 ? " active" : ""}" id="s-${e.id}" data-posfilter="0">
         <p class="lead">落札 ${e.mercato.length} 件 / シーズン中の売却 ${e.live.length} 件</p>
+        ${posFilter(e)}
         ${parts.join("\n")}
       </div>`;
     })
@@ -436,6 +461,14 @@ function main() {
   .tab .count{font-size:11px;opacity:.75;margin-left:2px}
   .season-panel,.phase-panel{display:none}
   .season-panel.active,.phase-panel.active{display:block}
+  /* ポジション絞り込み: 行を重複させず data-pos で出し分ける */
+  .season-panel[data-posfilter="1"] tbody tr:not([data-pos="1"]),
+  .season-panel[data-posfilter="2"] tbody tr:not([data-pos="2"]),
+  .season-panel[data-posfilter="3"] tbody tr:not([data-pos="3"]),
+  .season-panel[data-posfilter="4"] tbody tr:not([data-pos="4"]){display:none}
+  .tabs.pos{margin-top:10px}
+  .pos-tab .pos{margin-right:2px}
+  .pos-tab.active .pos{opacity:.9}
   table{border-collapse:collapse;width:100%;font-size:13px}
   th,td{padding:4px 8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
   thead th{color:var(--muted);font-weight:500;font-size:12px}
@@ -565,6 +598,14 @@ if (!isMain) {
   console.assert(hist.a.length === 2, `歴代の集約失敗: ${hist.a?.length}`);
   console.assert(hist.a[0].date === "2022-03-15", `時系列に並んでいない: ${hist.a[0].date}`);
   console.assert(hist.a[0].team === "🌟 Gota", "歴代の監督名が解決されていない");
+
+  // ポジション絞り込み: 登場するポジションの分だけタブを出す
+  const filter = posFilter({ mercato: [{ position: 2 }, { position: 4 }, { position: 4 }] });
+  console.assert((filter.match(/pos-tab/g) ?? []).length === 3, "ポジションタブ数が不正（全て + DF + FW）");
+  console.assert(filter.includes('data-pos="4"') && !filter.includes('data-pos="1"'), "不在ポジションのタブが出ている");
+  console.assert(filter.includes('<span class="count">2</span>'), "ポジション別の件数が不正");
+  // 1種類しか無い場合は絞り込む意味がないので出さない
+  console.assert(posFilter({ mercato: [{ position: 3 }] }) === "", "単一ポジションでもタブが出ている");
   console.log("self-check OK");
 } else {
   main();
