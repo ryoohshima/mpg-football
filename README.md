@@ -17,7 +17,8 @@ fetch スクリプト（Node.js）
     → /dashboard で現行シーズンのディビジョンを取得
     → /league/{id} で過去シーズンのディビジョンも収集
     → /division-ranking/division/{id}/{traders|transfersExperts|transfersLosers}
-    → /championship-players-pool/{id}/details（選手名の解決用）
+    → /championship-players-pool/{id}/details（選手名の解決用・現行シーズン分）
+    → /championship-player/{playerId}（プールに無い過去の選手を個別解決）
   → data/*.json に保存
         ↓
 ビジュアル化（静的 HTML）
@@ -65,5 +66,5 @@ pnpm run check
 
 - MPG の API は非公式利用のため、仕様変更で動かなくなる可能性がある
 - `.env`（アクセストークン）は絶対にコミットしない。トークンは数時間で失効する
-- 選手プール API は現行シーズンの選手しか返さないため、過去の移籍相手でリーグを去った選手は名前を解決できず「選手 #ID」と表示される
+- 選手プール API は現行シーズンの選手しか返さない。過去の移籍相手は `/championship-player/{playerId}` で個別に取得して名前を解決している
 - 取得データは私的利用の範囲に留める
