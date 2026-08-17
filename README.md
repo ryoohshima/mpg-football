@@ -16,6 +16,7 @@ fetch スクリプト（Node.js）
   .env の MPG_TOKEN（Auth0 アクセストークン）
     → /dashboard で現行シーズンのディビジョンを取得
     → /league/{id} で過去シーズンのディビジョンも収集
+    → /division-history/division/{id}（全取引の記録・主データ）
     → /division-ranking/division/{id}/{traders|transfersExperts|transfersLosers}
     → /championship-players-pool/{id}/details（選手名の解決用・現行シーズン分）
     → /championship-player/{playerId}（プールに無い過去の選手を個別解決）
@@ -27,14 +28,23 @@ fetch スクリプト（Node.js）
 
 ## 取得できるデータ
 
+主データは `/division-history/division/{id}`。**全取引の記録**が入っており、可視化はここを表示する。
+
+| セクション | 内容 |
+|---|---|
+| `mercato` | フェーズ1〜4の落札。選手 / 獲得監督 / 評価額 / 落札額 / 競合した入札 / 日付 |
+| `live` | シーズン中の売却。購入額 → 売却額 → 損益 / 保有期間 |
+| `restartingData` | リスタート時の保有引き継ぎ |
+
+補助データ（ランキングの抜粋。監督名の解決にも使う）:
+
 | 種別 | 内容 |
 |---|---|
-| `traders` | チームの資産価値の伸び（初期値 / 現在値 / 増減） |
-| `transfersExperts` | 儲かった移籍（購入額 → 売却額 → 損益） |
-| `transfersLosers` | 損した移籍 |
+| `traders` | チームの資産価値の伸び |
+| `transfersExperts` / `transfersLosers` | 儲かった / 損した移籍の上位数件 |
 | `best-available-players` | 移籍市場の選手（移籍期間中のディビジョンのみ） |
 
-移籍ランキングは**完了済みシーズン**のディビジョンでのみ返る。未開始シーズンは 500 になるため skip される。
+いずれも**完了済みシーズン**のディビジョンでのみ返る。未開始シーズンは 404 / 500 になるため skip される。
 
 ## 技術スタック
 
