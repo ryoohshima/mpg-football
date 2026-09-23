@@ -1,0 +1,147 @@
+name: Dependabot auto-merge
+
+on:
+  workflow_run:
+    workflows: [CI, React Doctor]
+    types: [completed]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check eligibility without merging
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+  actions: read
+
+concurrency:
+  group: dependabot-auto-merge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    # CI is not configured: only run manual diagnostics, without spending scheduled runner minutes.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BASE_BRANCH: main
+      # Empty means paused until this repository has CI; never merge untested updates.
+      REQUIRED_CHECKS: '[]'
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - name: Merge a tested Dependabot update
+        # No checkout: privileged code comes only from this default-branch workflow.
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import subprocess
+          from pathlib import PurePosixPath
+
+
+          def api(path, *, pages=False, method='GET', data=None):
+              args = ['gh', 'api', path, '--method', method]
+              if pages:
+                  args += ['--paginate', '--slurp']
+              if data is not None:
+                  args += ['--input', '-']
+              return json.loads(subprocess.check_output(
+                  args, input=json.dumps(data) if data is not None else None, text=True))
+
+
+          def checks_pass(runs, statuses, required):
+              successful = {r['name'] for r in runs
+                            if r['status'] == 'completed' and r['conclusion'] == 'success'
+                            and r['app']['slug'] == 'github-actions'}
+              return (bool(required) and set(required) <= successful
+                      and all(r['status'] == 'completed'
+                              and r['conclusion'] in ('success', 'neutral', 'skipped') for r in runs)
+                      and all(s['state'] == 'success' for s in statuses))
+
+
+          def allowed_file(name):
+              return (PurePosixPath(name).name in ('package.json', 'package-lock.json', 'pnpm-lock.yaml',
+                                                 'pnpm-workspace.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb')
+                      or (name.startswith('.github/workflows/') and name.endswith(('.yml', '.yaml'))))
+
+
+          def self_check():
+              good = dict(name='test', status='completed', conclusion='success', app={'slug': 'github-actions'})
+              assert checks_pass([good], [], ['test'])
+              assert not checks_pass([], [], ['test'])
+              assert not checks_pass([good], [], [])
+              for conclusion in ('failure', 'cancelled', 'timed_out', 'skipped'):
+                  assert not checks_pass([{**good, 'conclusion': conclusion}], [], ['test'])
+              assert not checks_pass([{**good, 'status': 'in_progress'}], [], ['test'])
+              assert not checks_pass([good], [{'state': 'pending'}], ['test'])
+              assert not checks_pass([good, {**good, 'name': 'optional', 'conclusion': 'failure'}], [], ['test'])
+              assert not checks_pass([{**good, 'app': {'slug': 'other'}}], [], ['test'])
+              assert allowed_file('template/package.json') and allowed_file('.github/workflows/ci.yml')
+              assert not allowed_file('src/app.ts')
+
+
+          def main():
+              self_check()
+              repo = os.environ['GH_REPO']
+              base = os.environ['BASE_BRANCH']
+              required = json.loads(os.environ['REQUIRED_CHECKS'])
+              if not required:
+                  print('Auto-merge paused: configure successful CI jobs in REQUIRED_CHECKS first.')
+                  return
+              root = f'repos/{repo}'
+              prs = api(f'{root}/pulls?state=open&base={base}&per_page=100', pages=True)
+              for item in (p for page in prs for p in page):
+                  if item['user']['login'] != 'dependabot[bot]':
+                      continue
+                  path = f'{root}/pulls/{item["number"]}'
+                  pr = api(path)
+                  if (pr['state'] != 'open' or pr['draft'] or pr['user']['login'] != 'dependabot[bot]'
+                          or pr['base']['ref'] != base or not pr['head']['repo']
+                          or pr['head']['repo']['full_name'] != repo or pr['mergeable'] is not True
+                          or pr['mergeable_state'] in ('blocked', 'behind', 'dirty', 'draft', 'unknown')):
+                      continue
+                  files = [f for page in api(f'{path}/files?per_page=100', pages=True) for f in page]
+                  if (len(files) != pr['changed_files'] or not files
+                          or not all(allowed_file(f['filename']) and f['status'] != 'renamed' for f in files)):
+                      continue
+                  sha = pr['head']['sha']
+                  runs = [r for page in api(f'{root}/commits/{sha}/check-runs?filter=latest&per_page=100', pages=True)
+                          for r in page['check_runs']]
+                  statuses = [s for page in api(f'{root}/commits/{sha}/status?per_page=100', pages=True)
+                              for s in page['statuses']]
+                  if not checks_pass(runs, statuses, required):
+                      print(f'Waiting for checks: #{pr["number"]}')
+                      continue
+                  fresh = api(path)
+                  if (fresh['head']['sha'] != sha or fresh['base']['sha'] != pr['base']['sha']
+                          or fresh['state'] != 'open' or fresh['draft'] or fresh['mergeable'] is not True
+                          or fresh['base']['ref'] != base or fresh['user']['login'] != 'dependabot[bot]'
+                          or not fresh['head']['repo'] or fresh['head']['repo']['full_name'] != repo
+                          or fresh['mergeable_state'] in ('blocked', 'behind', 'dirty', 'draft', 'unknown')):
+                      continue
+                  if os.environ.get('DRY_RUN') == 'true':
+                      print(f'Dry run: ready to merge #{pr["number"]} at {sha}')
+                      break
+                  result = api(f'{path}/merge', method='PUT', data={'sha': sha, 'merge_method': 'squash'})
+                  if not result.get('merged'):
+                      raise RuntimeError(f'Merge refused for #{pr["number"]}')
+                  print(f'Merged #{pr["number"]}: {result["sha"]}')
+                  if os.environ.get('DEPLOY_WORKFLOW'):
+                      subprocess.run(['gh', 'workflow', 'run', os.environ['DEPLOY_WORKFLOW'],
+                                      '--repo', repo, '--ref', base], check=True)
+                  # One merge per run lets Dependabot refresh sibling lockfiles before the next check.
+                  break
+
+
+          if __name__ == '__main__':
+              main()
+          PYTHON
